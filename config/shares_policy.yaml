@@ -1,0 +1,90 @@
+# DriveMap Bot Policy & Share Discovery Configuration (kdb.kz)
+
+# Drive letters strictly reserved for local OS/media/system drives
+protected_letters:
+  - A
+  - B
+  - C
+  - D
+
+# Auto-selection priority order when proposing a free drive letter for ad-hoc mounts.
+# Prioritizes completely unused / low-contention letters before heavily used department letters (Y, Z).
+preferred_free_pool:
+  - G
+  - E
+  - F
+  - H
+  - I
+  - J
+  - K
+  - L
+  - M
+  - N
+  - Q
+  - V
+  - O
+  - S
+  - U
+  - X
+  - R
+  - T
+  - P
+  - W
+  - Y
+  - Z
+
+# Technical / infrastructure shares hidden from normal admin selection unless explicitly enabled
+share_blacklist_patterns:
+  - '^ADMIN\$$'
+  - '^[A-Z]\$$'
+  - '^IPC\$$'
+  - '^NETLOGON$'
+  - '^SYSVOL$'
+  - '^BPR\d+$'
+  - '^Colvir_instances$'
+  - '^domainmsi\$$'
+  - '^Distr$'
+  - '^SoftWare$'
+  - '^ScreenSavers$'
+  - '^screens\$$'
+  - '^CopyUser\$$'
+  - '^Users$'
+  - '^FTP$'
+  - '^database$'
+  - '^Swifttest\$$'
+  - '^Notebook\$$'
+
+# Curated fallback / label overrides (supplements labels discovered automatically from GPOs)
+custom_label_overrides:
+  '\\STORAGE\Transfer$':
+    label: Transfer
+    preferred_letter: J
+  '\\STORAGE\Public':
+    label: Public
+    preferred_letter: P
+  '\\STORAGE\HelpDesk':
+    label: HelpDesk
+    preferred_letter: W
+
+# OUs excluded when searching AD users
+excluded_user_ou_substrings:
+  - 'OU=Fired,'
+  - 'OU=Service Accounts,'
+  - 'OU=Guest,'
+
+# Naming patterns for AD security groups dedicated to file share permissions (safe to add/remove members)
+manageable_group_patterns:
+  - '^Share_.+_(RO|RW)$'
+  - '^FS[-_].+_(RO|RW)$'
+
+# Optional explicit share-access AD group sAMAccountNames outside the standard naming above
+explicit_manageable_groups: []
+
+# Additional system/broad principals that the bot must never alter in NTFS ACLs
+protected_acl_principals:
+  - 'svc_drivemap_bot'
+  - 'Domain Admins'
+  - 'Enterprise Admins'
+  - 'Domain Users'
+  - 'Администраторы'
+  - 'Пользователи'

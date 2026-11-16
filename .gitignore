@@ -1,0 +1,43 @@
+# Environment secrets
+.env
+*.env
+.env.*
+!.env.example
+
+# SQLite databases & backups
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+data/*.db
+!data/.gitkeep
+backups/
+*.tar.gz
+*.zip
+*.csv
+
+# Sensitive artifacts & IDs
+*.id
+*.pfx
+*.key
+*.pem
+
+# Logs & caches
+logs/
+*.log
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+.venv/
+env/
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini

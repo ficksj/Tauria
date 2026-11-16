@@ -1,0 +1,77 @@
+# DriveMap & Share Access Bot Policy Configuration
+# Copy to config/shares_policy.yaml and customize for your Active Directory environment.
+
+# Drive letters strictly reserved for local OS/media/system drives
+protected_letters:
+  - A
+  - B
+  - C
+  - D
+
+# Auto-selection priority order when proposing a free drive letter for ad-hoc mounts.
+preferred_free_pool:
+  - G
+  - E
+  - F
+  - H
+  - I
+  - J
+  - K
+  - L
+  - M
+  - N
+  - Q
+  - V
+  - O
+  - S
+  - U
+  - X
+  - R
+  - T
+  - P
+  - W
+  - Y
+  - Z
+
+# Technical / infrastructure shares hidden from admin UI selection
+share_blacklist_patterns:
+  - '^ADMIN\$$'
+  - '^[A-Z]\$$'
+  - '^IPC\$$'
+  - '^NETLOGON$'
+  - '^SYSVOL$'
+  - '^PRINT\$$'
+  - '^FAX\$$'
+  - '^Distr$'
+  - '^SoftWare$'
+  - '^Users$'
+
+# Optional friendly labels and default drive letters for common shares
+custom_label_overrides:
+  '\\FS01\Public':
+    label: Public
+    preferred_letter: P
+  '\\FS01\HelpDesk':
+    label: HelpDesk
+    preferred_letter: W
+
+# OUs excluded when searching AD users
+excluded_user_ou_substrings:
+  - 'OU=Fired,'
+  - 'OU=Service Accounts,'
+  - 'OU=Guest,'
+
+# Naming patterns for AD security groups dedicated to file share permissions (safe to manage)
+manageable_group_patterns:
+  - '^Share_.+_(RO|RW)$'
+  - '^FS[-_].+_(RO|RW)$'
+
+# Optional explicit share-access AD group sAMAccountNames outside the standard naming above
+explicit_manageable_groups: []
+
+# Additional principals that the bot must never alter in NTFS ACLs
+protected_acl_principals:
+  - 'svc_drivemap_bot'
+  - 'Domain Admins'
+  - 'Enterprise Admins'
+  - 'Domain Users'
