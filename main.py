@@ -24,6 +24,8 @@ from handlers.kolins_handlers import kolins_router
 from handlers.user_handlers import router as user_router
 from handlers.pc_handlers import router as pc_router
 from handlers.lotus_handlers import router as lotus_router
+from handlers.health_handlers import health_router
+from handlers.rbac_handlers import rbac_router
 from drivemap import init_drivemap_module
 
 
@@ -38,7 +40,7 @@ def create_bot_session() -> AiohttpSession:
 
 
 async def main():
-    log.info("Starting Tauria SuperAdmin Bot v6.0...")
+    log.info("Starting Tauria SuperAdmin Bot v7.0...")
 
     if not settings.BOT_TOKEN:
         log.critical("BOT_TOKEN is not set in .env! Please create Tauria/.env with your token.")
@@ -47,7 +49,7 @@ async def main():
     if not settings.super_admins:
         log.warning("SUPER_ADMIN_IDS is empty! No one will have access to the bot.")
 
-    # Init SQLite DB for audit, hosts, Lotus ID and sessions
+    # Init SQLite DB for audit, hosts, Lotus ID, RBAC and sessions
     await init_db()
 
     session = create_bot_session()
@@ -66,6 +68,8 @@ async def main():
     # Include core routers
     dp.include_router(menu_router)
     dp.include_router(ad_admin_router)
+    dp.include_router(health_router)
+    dp.include_router(rbac_router)
     dp.include_router(security_router)
     dp.include_router(infra_router)
     dp.include_router(kolins_router)

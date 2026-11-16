@@ -41,6 +41,14 @@ class Settings(BaseSettings):
         default="OU=Disabled Users,DC=kdb,DC=kz",
         description="OU where offboarded/disabled accounts are moved"
     )
+    AD_DEFAULT_NEW_USER_OU: str = Field(
+        default="OU=Bank Divisions,OU=KDB Users,DC=kdb,DC=kz",
+        description="Default OU for newly created staff accounts"
+    )
+    AD_INTERN_OU: str = Field(
+        default="OU=Intern,OU=KDB Users,DC=kdb,DC=kz",
+        description="OU for intern accounts"
+    )
     TARGET_PC_OUS: str = Field(
         default="OU=KDB Computers,DC=kdb,DC=kz;OU=KDB Nout,DC=kdb,DC=kz;CN=Servers,DC=kdb,DC=kz",
         description="Semicolon-separated OUs for PC scanning"

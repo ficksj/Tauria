@@ -38,5 +38,9 @@ class RollbackOffboardState(StatesGroup):
     waiting_for_username = State()
 
 class CreateUserState(StatesGroup):
+    waiting_for_mode = State()
+    waiting_for_sz_raw_text = State()
     waiting_for_fullname = State()
+    waiting_for_sz_info = State()
+    waiting_for_intern_duration = State()
     waiting_for_department = State()

@@ -146,6 +146,17 @@ def _attr_val(attrs: dict, key: str, default=None):
     return val if val is not None else default
 
 
+def datetime_to_ad_filetime(dt: datetime.datetime) -> int:
+    """Конвертирует дату в Windows FileTime (100-ns интервалы с 01.01.1601 UTC)."""
+    if dt.tzinfo is None:
+        dt_local = dt.replace(hour=23, minute=59, second=59, microsecond=0, tzinfo=TZ_LOCAL)
+    else:
+        dt_local = dt.astimezone(TZ_LOCAL).replace(hour=23, minute=59, second=59, microsecond=0)
+    dt_utc = dt_local.astimezone(datetime.timezone.utc)
+    epoch = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
+    return int((dt_utc - epoch).total_seconds() * 10_000_000)
+
+
 class TauriaADService:
     def __init__(self):
         self.server_ip = settings.AD_SERVER
@@ -868,43 +879,43 @@ class TauriaADService:
 
     # --- МЕТОДЫ ДЛЯ СУПЕРАДМИН-ФУНКЦИЙ TAURIA ---
 
+    def get_locked_users_sync(self) -> List[Dict[str, Any]]:
+        """Синхронный поиск всех заблокированных активных учетных записей (lockoutTime > 0)."""
+        search_filter = (
+            "(&(objectCategory=person)(objectClass=user)"
+            "(lockoutTime>=1)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
+        )
+        attributes = ["sAMAccountName", "displayName", "lockoutTime", "mail", "department", "title", "badPwdCount"]
+        entries = self._safe_paged_search(self.base_dn, search_filter, attributes)
+        results = []
+        for item in entries:
+            a = item.get("attributes", {})
+            lt_dt = _parse_ad_dt(_attr_val(a, "lockoutTime"))
+            if not lt_dt:
+                continue
+            uname = str(_attr_val(a, "sAMAccountName", "") or "")
+            if not uname:
+                continue
+            disp = str(_attr_val(a, "displayName") or uname)
+            results.append({
+                "username": uname,
+                "name": disp,
+                "display_name": disp,
+                "lockout_time": _fmt_local_dt(lt_dt),
+                "lockout_ts": lt_dt.timestamp(),
+                "mail": str(_attr_val(a, "mail") or "—"),
+                "department": str(_attr_val(a, "department") or "—"),
+                "title": str(_attr_val(a, "title") or "—"),
+                "bad_pwd_count": int(_attr_val(a, "badPwdCount", 0) or 0),
+                "dn": str(item.get("dn") or ""),
+            })
+        results.sort(key=lambda x: x["lockout_ts"], reverse=True)
+        return results
+
     async def get_locked_users(self) -> List[Dict[str, Any]]:
         """Поиск всех заблокированных активных учетных записей (lockoutTime > 0)."""
         loop = asyncio.get_running_loop()
-
-        def _query():
-            search_filter = (
-                "(&(objectCategory=person)(objectClass=user)"
-                "(lockoutTime>=1)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
-            )
-            attributes = ["sAMAccountName", "displayName", "lockoutTime", "mail", "department", "title", "badPwdCount"]
-            entries = self._safe_paged_search(self.base_dn, search_filter, attributes)
-            results = []
-            for item in entries:
-                a = item.get("attributes", {})
-                lt_dt = _parse_ad_dt(_attr_val(a, "lockoutTime"))
-                if not lt_dt:
-                    continue
-                uname = str(_attr_val(a, "sAMAccountName", "") or "")
-                if not uname:
-                    continue
-                disp = str(_attr_val(a, "displayName") or uname)
-                results.append({
-                    "username": uname,
-                    "name": disp,
-                    "display_name": disp,
-                    "lockout_time": _fmt_local_dt(lt_dt),
-                    "lockout_ts": lt_dt.timestamp(),
-                    "mail": str(_attr_val(a, "mail") or "—"),
-                    "department": str(_attr_val(a, "department") or "—"),
-                    "title": str(_attr_val(a, "title") or "—"),
-                    "bad_pwd_count": int(_attr_val(a, "badPwdCount", 0) or 0),
-                    "dn": str(item.get("dn") or ""),
-                })
-            results.sort(key=lambda x: x["lockout_ts"], reverse=True)
-            return results
-
-        return await loop.run_in_executor(None, _query)
+        return await loop.run_in_executor(None, self.get_locked_users_sync)
 
     async def get_user_groups(self, username: str) -> List[str]:
         """Получение списка групп пользователя."""
@@ -1245,6 +1256,8 @@ class TauriaADService:
         expiring.sort(key=lambda x: x["days_left"])
         return expiring
 
+    get_expiring_passwords = get_expiring_passwords_sync
+
     async def get_expiring_password_users(self, days: int = 7) -> dict:
         """Поиск активных пользователей AD с истекающим сроком действия пароля."""
         loop = asyncio.get_running_loop()
@@ -1328,7 +1341,9 @@ class TauriaADService:
         ou_dn: str,
         department: str = "",
         title: str = "",
-        groups: list[str] = None,
+        description: str = "",
+        groups: list[str] | None = None,
+        account_expires_dt: datetime.datetime | None = None,
     ) -> dict:
         """Создание нового пользователя в AD, установка пароля, включение учетки и добавление в группы."""
         loop = asyncio.get_running_loop()
@@ -1339,14 +1354,50 @@ class TauriaADService:
                 if not self.conn:
                     return {"success": False, "error": "Нет подключения к AD"}
 
-                user_dn = f"CN={full_name},{ou_dn}"
-                parts = full_name.strip().split(None, 1)
-                given_name = parts[0] if parts else full_name
-                sn = parts[1] if len(parts) > 1 else ""
+                # 1. Подбор свободного sAMAccountName
+                base_username = username.strip()
+                actual_username = base_username
+                suffix = 2
+                while True:
+                    safe_u = escape_filter_chars(actual_username)
+                    if self._safe_search(self.base_dn, f"(sAMAccountName={safe_u})", ["sAMAccountName"]) and self.conn.entries:
+                        actual_username = f"{base_username[:18]}{suffix}"
+                        suffix += 1
+                    else:
+                        break
+
+                # 2. Проверка существования целевого OU (с fallback)
+                target_ou = ou_dn
+                ou_candidates = [
+                    ou_dn,
+                    f"OU=KDB Users,{self.base_dn}",
+                    f"CN=Users,{self.base_dn}",
+                ]
+                for cand_ou in ou_candidates:
+                    if not cand_ou:
+                        continue
+                    try:
+                        if self.conn.search(search_base=cand_ou, search_filter="(objectClass=*)", search_scope=ldap3.BASE, attributes=["distinguishedName"]):
+                            target_ou = cand_ou
+                            break
+                    except Exception:
+                        continue
+
+                user_dn = f"CN={full_name},{target_ou}"
+                parts = full_name.strip().split()
+                if len(parts) >= 2:
+                    sn = parts[0]
+                    given_name = " ".join(parts[1:])
+                elif parts:
+                    given_name = parts[0]
+                    sn = ""
+                else:
+                    given_name = full_name
+                    sn = ""
 
                 attrs = {
-                    "sAMAccountName": username,
-                    "userPrincipalName": f"{username}@{self.domain}" if getattr(self, "domain", None) else username,
+                    "sAMAccountName": actual_username,
+                    "userPrincipalName": f"{actual_username}@{self.domain}" if getattr(self, "domain", None) else actual_username,
                     "displayName": full_name,
                     "givenName": given_name,
                     "userAccountControl": 514,  # Disabled initially until password is set
@@ -1357,6 +1408,11 @@ class TauriaADService:
                     attrs["department"] = department
                 if title:
                     attrs["title"] = title
+                if description:
+                    attrs["description"] = description
+                if account_expires_dt is not None:
+                    filetime = datetime_to_ad_filetime(account_expires_dt)
+                    attrs["accountExpires"] = str(filetime)
 
                 created = self.conn.add(
                     user_dn,
@@ -1366,23 +1422,24 @@ class TauriaADService:
                 if not created:
                     return {"success": False, "error": f"Ошибка создания в AD: {self.conn.result}"}
 
-                if not self.reset_password(username, password, must_change=True):
+                if not self.reset_password(actual_username, password, must_change=True):
                     return {"success": False, "error": "Пользователь создан, но не удалось установить пароль"}
 
                 enabled = self.conn.modify(user_dn, {"userAccountControl": [(MODIFY_REPLACE, [512])]})
                 if not enabled:
                     return {"success": False, "error": f"Пароль установлен, но не удалось включить учетку: {self.conn.result}"}
 
-                return {"success": True, "dn": user_dn, "username": username}
+                return {"success": True, "dn": user_dn, "username": actual_username}
 
         res = await loop.run_in_executor(None, _create)
         if not res.get("success"):
             return res
 
+        actual_username = res.get("username", username)
         added_groups = []
         failed_groups = []
         for grp in (groups or []):
-            if await self.add_user_to_group(username, grp):
+            if await self.add_user_to_group(actual_username, grp):
                 added_groups.append(grp)
             else:
                 failed_groups.append(grp)

@@ -47,6 +47,10 @@ def get_home_card(admin_name: str, ad_ok: bool, pending_lotus: int = 0) -> str:
             callback_button("🗄 Диски & Шары", "menu:drives", "primary"),
         ),
         button_row(
+            callback_button("🛡 Здоровье AD", "health:main", "primary"),
+            callback_button("➕ Онбординг по СЗ", "ad:create_user", "success"),
+        ),
+        button_row(
             callback_button("🖥 Инфраструктура", "menu:infra", "primary"),
             callback_button(lotus_label, "lotus:list", "primary"),
         ),
@@ -59,16 +63,17 @@ def get_home_card(admin_name: str, ad_ok: bool, pending_lotus: int = 0) -> str:
             callback_button("🏎 Бот Testarossa", "menu:kolins", "primary"),
         ),
         button_row(
+            callback_button("🔐 Доступ (RBAC)", "menu:rbac", "primary"),
             callback_button("🌐 Сеть & SSL", "menu:net", "primary"),
-            callback_button("📋 Аудит", "menu:audit", "link"),
         ),
         button_row(
+            callback_button("📋 Аудит", "menu:audit", "link"),
             callback_button("🔄 Обновить", "menu:home", "link"),
-        )
+        ),
     ]
     return render_bubble_card(
         title="⚡️ Tauria · SuperAdmin Hub",
-        badge="v6.0",
+        badge="v7.0",
         body_lines=body,
         table_rows=table,
         footer_note="Выберите раздел управления инфраструктурой выше",
