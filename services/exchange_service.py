@@ -28,14 +28,14 @@ def _run_exchange_ps_sync(ps_script: str, timeout: int = 25) -> Dict[str, Any]:
     через pypsrp WinRMClient с учетной записью settings.AD_USER / settings.AD_PASSWORD.
     """
     host = (settings.EXCHANGE_SERVER or "192.168.254.23").strip()
-    user = settings.AD_USER or settings.pc_admin_user
-    password = settings.AD_PASSWORD or settings.pc_admin_password
+    user = settings.exchange_user or settings.AD_USER or settings.pc_admin_user
+    password = settings.exchange_password or settings.AD_PASSWORD or settings.pc_admin_password
 
     if WinRMClient is None:
         return {"ok": False, "error": "Пакет pypsrp не установлен", "stdout": ""}
 
     if not user or not password:
-        return {"ok": False, "error": "Учетные данные AD_USER / AD_PASSWORD не заданы в .env", "stdout": ""}
+        return {"ok": False, "error": "Учетные данные EXCHANGE_USER / AD_USER не заданы в .env", "stdout": ""}
 
     try:
         client = WinRMClient(

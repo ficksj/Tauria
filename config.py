@@ -56,6 +56,8 @@ class Settings(BaseSettings):
 
     # Exchange Server
     EXCHANGE_SERVER: str = Field(default="192.168.254.23", description="Exchange Server IP/FQDN")
+    EXCHANGE_USER: str = Field(default="", description="Exchange admin user for WinRM")
+    EXCHANGE_PASSWORD: str = Field(default="", description="Exchange admin password for WinRM")
 
     # DriveMap & File Shares Integration (SYSVOL / GPO / SMB ACL)
     SYSVOL_HOST: str = Field(default="192.168.201.15", description="SYSVOL Domain Controller host")
@@ -112,6 +114,14 @@ class Settings(BaseSettings):
     @property
     def lotus_storage_password(self) -> str:
         return self.LOTUS_STORAGE_PASSWORD or self.AD_PASSWORD
+
+    @property
+    def exchange_user(self) -> str:
+        return self.EXCHANGE_USER or self.AD_USER
+
+    @property
+    def exchange_password(self) -> str:
+        return self.EXCHANGE_PASSWORD or self.AD_PASSWORD
 
     @property
     def target_pc_ous_list(self) -> List[str]:
