@@ -78,7 +78,8 @@ async def main():
     dp.include_router(lotus_router)
 
     # Initialize and register DriveMap & Share ACL module
-    await init_drivemap_module(dp)
+    drivemap_router = await init_drivemap_module(dp)
+    dp.include_router(drivemap_router)
 
     @dp.errors()
     async def global_error_handler(event: ErrorEvent):
