@@ -10,10 +10,10 @@ from middlewares.admin_middleware import SuperAdminMiddleware
 
 
 @pytest.fixture
-async def temp_db(tmp_path, monkeypatch):
+def temp_db(tmp_path, monkeypatch):
     db_file = str(tmp_path / "test_tauria_v7.db")
     monkeypatch.setattr(db_service, "DB_PATH", db_file)
-    await db_service.init_db(db_file)
+    db_service._init_db_sync(db_file)
     return db_file
 
 
