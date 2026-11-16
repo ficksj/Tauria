@@ -22,6 +22,7 @@ from services.exchange_service import (
     get_exchange_overview,
     get_exchange_mailflow_errors,
     get_exchange_forwarding_audit,
+    enable_user_mailbox,
 )
 from services.playbooks_service import get_playbooks_list, execute_playbook, PLAYBOOKS
 from services.terminal_service import run_quick_command
@@ -612,6 +613,46 @@ async def process_net_custom_target(message: Message, state: FSMContext):
         buttons=buttons,
     )
     await send_rich(message, card)
+
+
+@infra_router.callback_query(F.data.startswith("exchange:mbx_user:"))
+async def cb_exchange_create_user_mailbox(call: CallbackQuery):
+    username = call.data.split(":", 2)[2].strip()
+    await call.answer(f"📧 Создаю почтовый ящик для {username}...", show_alert=False)
+
+    res = await enable_user_mailbox(identity=username)
+    ok = bool(res.get("ok"))
+    await log_audit_action(
+        admin_id=call.from_user.id,
+        admin_username=call.from_user.username,
+        action="EXCHANGE_ENABLE_MAILBOX",
+        target=username,
+        status="SUCCESS" if ok else "FAILED",
+    )
+
+    if ok:
+        already = res.get("already_exists", False)
+        title = "📧 Почтовый ящик уже существует" if already else "✅ Почтовый ящик создан"
+        body = [
+            f"<b>Сотрудник:</b> <code>{html_text(username)}</code>",
+            f"<b>Email:</b> <code>{html_text(res.get('primary_smtp', '—'))}</code>",
+            f"<b>База Exchange:</b> <code>{html_text(res.get('database', '—'))}</code>",
+            f"<b>Alias:</b> <code>{html_text(res.get('alias', username))}</code>",
+        ]
+    else:
+        title = "❌ Ошибка создания почты"
+        body = [f"Не удалось создать ящик для <code>{html_text(username)}</code>:\n<code>{html_text(str(res.get('error', 'Ошибка')))}</code>"]
+
+    card = render_bubble_card(
+        title=title,
+        badge="Exchange",
+        body_lines=body,
+        buttons=[
+            button_row(callback_button("👤 В карточку сотрудника", f"user:show:{username}", "primary")),
+            button_row(callback_button("⬅️ Главное меню", "menu:home", "link")),
+        ],
+    )
+    await edit_rich(call.message, card)
 
 
 # ==========================================

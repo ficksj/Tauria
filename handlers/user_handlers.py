@@ -153,12 +153,13 @@ def render_user_profile(
         ),
         button_row(
             callback_button("📄 Акт техники", f"user:act:{username}", "primary"),
-            callback_button("🖼 Фото AD", f"user:photo:{username}", "secondary"),
+            callback_button("📧 Создать почту", f"exchange:mbx_user:{username}", "success"),
         ),
         button_row(
+            callback_button("🖼 Фото AD", f"user:photo:{username}", "secondary"),
             callback_button("🔄 Обновить", f"user:show:{username}", "link"),
-            callback_button("⬅️ Главное меню", "home:main", "link"),
         ),
+        button_row(callback_button("⬅️ Главное меню", "home:main", "link")),
     ]
 
     return render_bubble_card(

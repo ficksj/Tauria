@@ -388,3 +388,65 @@ async def get_exchange_forwarding_audit() -> Dict[str, Any]:
             "host": settings.EXCHANGE_SERVER,
             "error": f"Ошибка разбора аудита пересылок: {e}",
         }
+
+
+async def enable_user_mailbox(
+    identity: str,
+    alias: str | None = None,
+    database: str | None = None,
+) -> Dict[str, Any]:
+    """Создает почтовый ящик Exchange (Enable-Mailbox) для существующей УЗ Active Directory."""
+    clean_id = (identity or "").strip()
+    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+        return {"ok": False, "error": "Некорректный логин пользователя"}
+
+    clean_alias = (alias or clean_id).strip()
+    if any(c in clean_alias for c in ("'", '"', ";", "`", "$", " ")):
+        clean_alias = clean_id
+
+    db_clause = f" -Database '{database.strip()}'" if database and database.strip() else ""
+    ps_script = f"""
+    $ErrorActionPreference = 'Stop'
+    try {{
+        Add-PSSnapin Microsoft.Exchange.Management.PowerShell.SnapIn -ErrorAction SilentlyContinue
+    }} catch {{}}
+
+    $existing = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
+    if ($existing) {{
+        @{{
+            already_exists = $true
+            primary_smtp = [string]$existing.PrimarySmtpAddress
+            database = [string]$existing.Database
+            alias = [string]$existing.Alias
+        }} | ConvertTo-Json -Compress
+        exit 0
+    }}
+
+    $mbx = Enable-Mailbox -Identity '{clean_id}' -Alias '{clean_alias}'{db_clause} -ErrorAction Stop
+    @{{
+        already_exists = $false
+        primary_smtp = [string]$mbx.PrimarySmtpAddress
+        database = [string]$mbx.Database
+        alias = [string]$mbx.Alias
+    }} | ConvertTo-Json -Compress
+    """
+
+    res = await asyncio.to_thread(_run_exchange_ps_sync, ps_script, 30)
+    if not res.get("ok"):
+        return {
+            "ok": False,
+            "error": res.get("error") or "Не удалось создать почтовый ящик Exchange",
+        }
+
+    try:
+        data = json.loads(res.get("stdout", "{}"))
+        return {
+            "ok": True,
+            "already_exists": bool(data.get("already_exists", False)),
+            "primary_smtp": str(data.get("primary_smtp") or f"{clean_alias}@kdb.kz"),
+            "database": str(data.get("database") or "—"),
+            "alias": str(data.get("alias") or clean_alias),
+        }
+    except Exception as e:
+        logger.error(f"Failed to parse Enable-Mailbox JSON: {e}")
+        return {"ok": False, "error": f"Ошибка разбора ответа Exchange: {e}"}
