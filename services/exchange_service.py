@@ -397,8 +397,9 @@ async def _run_exchange_task_ps(inner_ps: str, timeout: int = 35) -> Dict[str, A
     ps_script = f"""
     $ErrorActionPreference = 'Stop'
     $uid = [guid]::NewGuid().ToString('N').Substring(0, 8)
-    $psPath = "$env:TEMP\\ex_task_$uid.ps1"
-    $outPath = "$env:TEMP\\ex_task_$uid.json"
+    $workDir = "C:\\Windows\\Temp"
+    $psPath = "$workDir\\ex_task_$uid.ps1"
+    $outPath = "$workDir\\ex_task_$uid.json"
     $taskName = "TauriaExTask_$uid"
 
     $innerScript = @"
@@ -419,7 +420,7 @@ try {{
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$psPath`""
         Register-ScheduledTask -TaskName $taskName -Action $action -User '{task_user}' -Password '{task_pass}' -RunLevel Highest -Force | Out-Null
         Start-ScheduledTask -TaskName $taskName
-        for ($i = 0; $i -lt 30; $i++) {{
+        for ($i = 0; $i -lt 60; $i++) {{
             Start-Sleep -Milliseconds 500
             if (Test-Path $outPath) {{ break }}
         }}
