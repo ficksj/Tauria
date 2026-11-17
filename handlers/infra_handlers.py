@@ -23,6 +23,7 @@ from services.exchange_service import (
     get_exchange_mailflow_errors,
     get_exchange_forwarding_audit,
     enable_user_mailbox,
+    disable_user_mailbox,
 )
 from services.playbooks_service import get_playbooks_list, execute_playbook, PLAYBOOKS
 from services.terminal_service import run_quick_command
@@ -642,6 +643,64 @@ async def cb_exchange_create_user_mailbox(call: CallbackQuery):
     else:
         title = "❌ Ошибка создания почты"
         body = [f"Не удалось создать ящик для <code>{html_text(username)}</code>:\n<code>{html_text(str(res.get('error', 'Ошибка')))}</code>"]
+
+    card = render_bubble_card(
+        title=title,
+        badge="Exchange",
+        body_lines=body,
+        buttons=[
+            button_row(callback_button("👤 В карточку сотрудника", f"user:show:{username}", "primary")),
+            button_row(callback_button("⬅️ Главное меню", "menu:home", "link")),
+        ],
+    )
+    await edit_rich(call.message, card)
+
+
+@infra_router.callback_query(F.data.startswith("exchange:del_ask:"))
+async def cb_exchange_delete_ask(call: CallbackQuery):
+    username = call.data.split(":", 2)[2].strip()
+    card = render_bubble_card(
+        title="⚠️ Удаление почтового ящика",
+        badge="Подтверждение",
+        body_lines=[
+            f"Вы уверены, что хотите удалить (отключить) почтовый ящик Exchange для <code>{html_text(username)}</code>?",
+            "<i>Учетная запись в Active Directory при этом сохранится.</i>",
+        ],
+        buttons=[
+            button_row(
+                callback_button("🗑 Да, удалить почту", f"exchange:del_confirm:{username}", "danger"),
+                callback_button("❌ Отмена", f"user:show:{username}", "link"),
+            )
+        ],
+    )
+    await edit_rich(call.message, card)
+    await call.answer()
+
+
+@infra_router.callback_query(F.data.startswith("exchange:del_confirm:"))
+async def cb_exchange_delete_confirm(call: CallbackQuery):
+    username = call.data.split(":", 2)[2].strip()
+    await call.answer(f"🗑 Удаляю почтовый ящик {username}...", show_alert=False)
+
+    res = await disable_user_mailbox(identity=username)
+    ok = bool(res.get("ok"))
+    await log_audit_action(
+        admin_id=call.from_user.id,
+        admin_username=call.from_user.username,
+        action="EXCHANGE_DISABLE_MAILBOX",
+        target=username,
+        status="SUCCESS" if ok else "FAILED",
+    )
+
+    if ok:
+        title = "🗑 Почтовый ящик удален"
+        body = [
+            f"<b>Сотрудник:</b> <code>{html_text(username)}</code>",
+            f"<b>Отключенный Email:</b> <code>{html_text(res.get('primary_smtp', '—'))}</code>",
+        ]
+    else:
+        title = "❌ Ошибка удаления почты"
+        body = [f"Не удалось удалить ящик для <code>{html_text(username)}</code>:\n<code>{html_text(str(res.get('error', 'Ошибка')))}</code>"]
 
     card = render_bubble_card(
         title=title,

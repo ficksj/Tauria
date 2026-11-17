@@ -390,53 +390,22 @@ async def get_exchange_forwarding_audit() -> Dict[str, Any]:
         }
 
 
-async def enable_user_mailbox(
-    identity: str,
-    alias: str | None = None,
-    database: str | None = None,
-) -> Dict[str, Any]:
-    """Создает почтовый ящик Exchange (Enable-Mailbox) для существующей УЗ Active Directory."""
-    clean_id = (identity or "").strip()
-    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
-        return {"ok": False, "error": "Некорректный логин пользователя"}
-
-    clean_alias = (alias or clean_id).strip()
-    if any(c in clean_alias for c in ("'", '"', ";", "`", "$", " ")):
-        clean_alias = clean_id
-
+async def _run_exchange_task_ps(inner_ps: str, timeout: int = 35) -> Dict[str, Any]:
+    """Запускает PowerShell-блок на сервере Exchange через одноразовый ScheduledTask (обход NTLM double-hop)."""
     ex_user = (settings.exchange_user or settings.AD_USER or "").strip()
     ex_pass = (settings.exchange_password or settings.AD_PASSWORD or "").replace("'", "''")
-    db_clause = f" -Database '{database.strip()}'" if database and database.strip() else ""
     ps_script = f"""
     $ErrorActionPreference = 'Stop'
     $uid = [guid]::NewGuid().ToString('N').Substring(0, 8)
-    $psPath = "$env:TEMP\\ex_mbx_$uid.ps1"
-    $outPath = "$env:TEMP\\ex_mbx_$uid.json"
-    $taskName = "TauriaExMbx_$uid"
+    $psPath = "$env:TEMP\\ex_task_$uid.ps1"
+    $outPath = "$env:TEMP\\ex_task_$uid.json"
+    $taskName = "TauriaExTask_$uid"
 
     $innerScript = @"
-`$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 try {{
     Add-PSSnapin Microsoft.Exchange.Management.PowerShell.SnapIn -ErrorAction SilentlyContinue
-    `$existing = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
-    if (`$existing) {{
-        @{{
-            ok = `$true
-            already_exists = `$true
-            primary_smtp = [string]`$existing.PrimarySmtpAddress
-            database = [string]`$existing.Database
-            alias = [string]`$existing.Alias
-        }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
-        exit 0
-    }}
-    `$mbx = Enable-Mailbox -Identity '{clean_id}' -Alias '{clean_alias}'{db_clause} -ErrorAction Stop
-    @{{
-        ok = `$true
-        already_exists = `$false
-        primary_smtp = [string]`$mbx.PrimarySmtpAddress
-        database = [string]`$mbx.Database
-        alias = [string]`$mbx.Alias
-    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+{inner_ps}
 }} catch {{
     @{{
         ok = `$false
@@ -464,25 +433,93 @@ try {{
         Remove-Item -Path $psPath, $outPath -Force -ErrorAction SilentlyContinue
     }}
     """
-
-    res = await asyncio.to_thread(_run_exchange_ps_sync, ps_script, 30)
+    res = await asyncio.to_thread(_run_exchange_ps_sync, ps_script, timeout)
     if not res.get("ok"):
-        return {
-            "ok": False,
-            "error": res.get("error") or "Не удалось создать почтовый ящик Exchange",
-        }
-
+        return {"ok": False, "error": res.get("error") or "Ошибка выполнения задачи Exchange"}
     try:
         data = json.loads(res.get("stdout", "{}"))
         if not data.get("ok", True):
             return {"ok": False, "error": str(data.get("error") or "Ошибка Exchange")}
-        return {
-            "ok": True,
-            "already_exists": bool(data.get("already_exists", False)),
-            "primary_smtp": str(data.get("primary_smtp") or f"{clean_alias}@kdb.kz"),
-            "database": str(data.get("database") or "—"),
-            "alias": str(data.get("alias") or clean_alias),
-        }
+        return data
     except Exception as e:
-        logger.error(f"Failed to parse Enable-Mailbox JSON: {e}")
+        logger.error(f"Failed to parse Exchange task JSON: {e}")
         return {"ok": False, "error": f"Ошибка разбора ответа Exchange: {e}"}
+
+
+async def enable_user_mailbox(
+    identity: str,
+    alias: str | None = None,
+    database: str | None = None,
+) -> Dict[str, Any]:
+    """Создает почтовый ящик Exchange (Enable-Mailbox) для существующей УЗ Active Directory."""
+    clean_id = (identity or "").strip()
+    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+        return {"ok": False, "error": "Некорректный логин пользователя"}
+
+    clean_alias = (alias or clean_id).strip()
+    if any(c in clean_alias for c in ("'", '"', ";", "`", "$", " ")):
+        clean_alias = clean_id
+
+    db_clause = f" -Database '{database.strip()}'" if database and database.strip() else ""
+    inner_ps = f"""
+    `$existing = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
+    if (`$existing) {{
+        @{{
+            ok = `$true
+            already_exists = `$true
+            primary_smtp = [string]`$existing.PrimarySmtpAddress
+            database = [string]`$existing.Database
+            alias = [string]`$existing.Alias
+        }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+        exit 0
+    }}
+    `$mbx = Enable-Mailbox -Identity '{clean_id}' -Alias '{clean_alias}'{db_clause} -ErrorAction Stop
+    @{{
+        ok = `$true
+        already_exists = `$false
+        primary_smtp = [string]`$mbx.PrimarySmtpAddress
+        database = [string]`$mbx.Database
+        alias = [string]`$mbx.Alias
+    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    """
+    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    if not data.get("ok"):
+        return {"ok": False, "error": data.get("error") or "Не удалось создать почтовый ящик Exchange"}
+    return {
+        "ok": True,
+        "already_exists": bool(data.get("already_exists", False)),
+        "primary_smtp": str(data.get("primary_smtp") or f"{clean_alias}@kdb.kz"),
+        "database": str(data.get("database") or "—"),
+        "alias": str(data.get("alias") or clean_alias),
+    }
+
+
+async def disable_user_mailbox(identity: str) -> Dict[str, Any]:
+    """Отключает/удаляет почтовый ящик Exchange (Disable-Mailbox), сохраняя УЗ Active Directory."""
+    clean_id = (identity or "").strip()
+    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+        return {"ok": False, "error": "Некорректный логин пользователя"}
+
+    inner_ps = f"""
+    `$existing = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
+    if (-not `$existing) {{
+        @{{
+            ok = `$false
+            error = "У пользователя '{clean_id}' нет активного почтового ящика Exchange"
+        }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+        exit 0
+    }}
+    `$smtp = [string]`$existing.PrimarySmtpAddress
+    Disable-Mailbox -Identity '{clean_id}' -Confirm:`$false -ErrorAction Stop
+    @{{
+        ok = `$true
+        primary_smtp = `$smtp
+    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    """
+    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    if not data.get("ok"):
+        return {"ok": False, "error": data.get("error") or "Не удалось удалить почтовый ящик Exchange"}
+    return {
+        "ok": True,
+        "primary_smtp": str(data.get("primary_smtp") or "—"),
+    }

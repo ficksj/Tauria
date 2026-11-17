@@ -14,6 +14,7 @@ SUPERADMIN_ONLY_CALLBACK_PREFIXES = (
     "kolins:maint_",
     "menu:rbac",
     "rbac:",
+    "exchange:del_",
 )
 SUPERADMIN_ONLY_COMMANDS = ("/exec",)
 
