@@ -404,31 +404,39 @@ async def enable_user_mailbox(
     if any(c in clean_alias for c in ("'", '"', ";", "`", "$", " ")):
         clean_alias = clean_id
 
+    ex_user = (settings.exchange_user or settings.AD_USER or "").strip()
+    ex_pass = (settings.exchange_password or settings.AD_PASSWORD or "").replace("'", "''")
     db_clause = f" -Database '{database.strip()}'" if database and database.strip() else ""
     ps_script = f"""
     $ErrorActionPreference = 'Stop'
-    try {{
-        Add-PSSnapin Microsoft.Exchange.Management.PowerShell.SnapIn -ErrorAction SilentlyContinue
-    }} catch {{}}
+    $sec = ConvertTo-SecureString '{ex_pass}' -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential('{ex_user}', $sec)
 
-    $existing = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
-    if ($existing) {{
+    Invoke-Command -ComputerName localhost -Credential $cred -ScriptBlock {{
+        $ErrorActionPreference = 'Stop'
+        try {{
+            Add-PSSnapin Microsoft.Exchange.Management.PowerShell.SnapIn -ErrorAction SilentlyContinue
+        }} catch {{}}
+
+        $existing = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
+        if ($existing) {{
+            @{{
+                already_exists = $true
+                primary_smtp = [string]$existing.PrimarySmtpAddress
+                database = [string]$existing.Database
+                alias = [string]$existing.Alias
+            }} | ConvertTo-Json -Compress
+            return
+        }}
+
+        $mbx = Enable-Mailbox -Identity '{clean_id}' -Alias '{clean_alias}'{db_clause} -ErrorAction Stop
         @{{
-            already_exists = $true
-            primary_smtp = [string]$existing.PrimarySmtpAddress
-            database = [string]$existing.Database
-            alias = [string]$existing.Alias
+            already_exists = $false
+            primary_smtp = [string]$mbx.PrimarySmtpAddress
+            database = [string]$mbx.Database
+            alias = [string]$mbx.Alias
         }} | ConvertTo-Json -Compress
-        exit 0
     }}
-
-    $mbx = Enable-Mailbox -Identity '{clean_id}' -Alias '{clean_alias}'{db_clause} -ErrorAction Stop
-    @{{
-        already_exists = $false
-        primary_smtp = [string]$mbx.PrimarySmtpAddress
-        database = [string]$mbx.Database
-        alias = [string]$mbx.Alias
-    }} | ConvertTo-Json -Compress
     """
 
     res = await asyncio.to_thread(_run_exchange_ps_sync, ps_script, 30)
