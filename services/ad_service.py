@@ -1456,7 +1456,7 @@ class TauriaADService:
 
         with self._lock:
             self.ensure_connection()
-            entries = self._safe_search(settings.AD_BASE_DN, search_filter, attrs)
+            entries = self._safe_search(self.base_dn, search_filter, attrs)
 
         if not entries:
             return {"ok": False, "error": "Компьютер не найден в AD"}
