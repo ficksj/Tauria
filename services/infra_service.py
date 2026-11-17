@@ -223,3 +223,83 @@ async def get_service_logs(service_name: str, lines: int = 50) -> Dict[str, Any]
             }
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _get_logs)
+
+
+async def add_dns_record(
+    name: str,
+    value: str,
+    record_type: str = "A",
+    zone: str | None = None,
+) -> Dict[str, Any]:
+    """Создает A или CNAME запись в DNS-зоне Active Directory через WinRM (pypsrp)."""
+    import ipaddress
+    from config import settings
+
+    clean_name = (name or "").strip().rstrip(".")
+    clean_val = (value or "").strip()
+    rtype = (record_type or "A").strip().upper()
+    target_zone = (zone or settings.AD_DOMAIN or "kdb.kz").strip()
+
+    if not clean_name or any(c in clean_name for c in ("'", '"', ";", "`", "$", " ")):
+        return {"ok": False, "error": "Некорректное имя DNS-записи."}
+    if not clean_val or any(c in clean_val for c in ("'", '"', ";", "`", "$", " ")):
+        return {"ok": False, "error": "Некорректное значение DNS-записи."}
+
+    if rtype == "A":
+        try:
+            ipaddress.IPv4Address(clean_val)
+        except Exception:
+            return {"ok": False, "error": f"Некорректный IPv4-адрес: {clean_val}"}
+        ps_cmd = (
+            f"$ErrorActionPreference='Stop'; "
+            f"try {{ Add-DnsServerResourceRecordA -Name '{clean_name}' -ZoneName '{target_zone}' -IPv4Address '{clean_val}' -AllowUpdateAny -CreatePtr }} "
+            f"catch {{ Add-DnsServerResourceRecordA -Name '{clean_name}' -ZoneName '{target_zone}' -IPv4Address '{clean_val}' -AllowUpdateAny }}"
+        )
+    elif rtype == "CNAME":
+        ps_cmd = (
+            f"$ErrorActionPreference='Stop'; "
+            f"Add-DnsServerResourceRecordCName -Name '{clean_name}' -ZoneName '{target_zone}' -HostNameAlias '{clean_val}'"
+        )
+    else:
+        return {"ok": False, "error": f"Неподдерживаемый тип записи: {rtype} (поддерживаются A и CNAME)."}
+
+    def _run_dns():
+        try:
+            from pypsrp.client import Client as WinRMClient
+        except ImportError:
+            return {"ok": False, "error": "Пакет pypsrp не установлен на сервере."}
+
+        host = (settings.AD_SERVER or "192.168.201.15").strip()
+        user = (settings.AD_USER or "").strip()
+        password = settings.AD_PASSWORD or ""
+        if not user or not password:
+            return {"ok": False, "error": "AD_USER / AD_PASSWORD не заданы в .env"}
+
+        try:
+            client = WinRMClient(
+                host,
+                username=user,
+                password=password,
+                ssl=False,
+                auth="negotiate",
+                encryption="auto",
+                connection_timeout=6,
+                read_timeout=20,
+            )
+            stdout, streams, had_errors = client.execute_ps(ps_cmd)
+            if had_errors:
+                err_msgs = [str(e) for e in (streams.error or [])] if streams else []
+                err_text = "; ".join(err_msgs)[:300] or "Ошибка PowerShell DNS"
+                return {"ok": False, "error": err_text}
+            return {
+                "ok": True,
+                "fqdn": f"{clean_name}.{target_zone}",
+                "type": rtype,
+                "value": clean_val,
+                "zone": target_zone,
+            }
+        except Exception as e:
+            log.error(f"DNS add error on {host}: {e}")
+            return {"ok": False, "error": str(e)}
+
+    return await asyncio.to_thread(_run_dns)

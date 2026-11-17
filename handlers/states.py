@@ -49,3 +49,7 @@ class CreateUserState(StatesGroup):
 class ExchangeActionState(StatesGroup):
     waiting_for_delegate_user = State()
     waiting_for_forward_email = State()
+
+
+class DnsRecordState(StatesGroup):
+    waiting_for_dns_input = State()

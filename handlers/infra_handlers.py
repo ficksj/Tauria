@@ -15,6 +15,7 @@ from services.infra_service import (
     get_all_services_status,
     restart_service,
     get_service_logs,
+    add_dns_record,
     MANAGED_SERVICES,
     SERVICE_LABELS,
 )
@@ -29,7 +30,7 @@ from services.exchange_service import (
     grant_mailbox_full_access,
     set_mailbox_forwarding,
 )
-from handlers.states import ExchangeActionState
+from handlers.states import ExchangeActionState, DnsRecordState
 from services.playbooks_service import get_playbooks_list, execute_playbook, PLAYBOOKS
 from services.terminal_service import run_quick_command
 from services.db_service import log_audit_action
@@ -510,9 +511,12 @@ async def cb_net_menu(call: CallbackQuery):
     buttons = [
         button_row(
             callback_button("🔍 Проверить свой хост/порт", "net:custom", "primary"),
-            callback_button("🔄 Обновить", "menu:net", "link"),
+            callback_button("➕ Добавить DNS-запись", "net:dns_add", "success"),
         ),
-        button_row(callback_button("⬅️ Главное меню", "menu:home", "link")),
+        button_row(
+            callback_button("🔄 Обновить", "menu:net", "link"),
+            callback_button("⬅️ Главное меню", "menu:home", "link"),
+        ),
     ]
 
     card = render_bubble_card(
@@ -524,6 +528,80 @@ async def cb_net_menu(call: CallbackQuery):
     )
     await edit_rich(call.message, card)
     await call.answer()
+
+
+@infra_router.callback_query(F.data == "net:dns_add")
+async def cb_net_dns_add_prompt(call: CallbackQuery, state: FSMContext):
+    await state.set_state(DnsRecordState.waiting_for_dns_input)
+    zone = settings.AD_DOMAIN or "kdb.kz"
+    card = render_bubble_card(
+        title="➕ Добавление DNS-записи",
+        badge=f"Зона: {zone}",
+        body_lines=[
+            "Отправьте параметры новой DNS-записи одним сообщением:",
+            "• Для <b>A-записи</b>: <code>имя IP</code> (например: <code>gitlab 192.168.202.50</code>)",
+            "• Для <b>CNAME</b>: <code>имя CNAME цель</code> (например: <code>wiki CNAME docs.kdb.kz</code>)",
+        ],
+        buttons=[button_row(callback_button("⬅️ Отмена", "menu:net", "link"))],
+    )
+    await edit_rich(call.message, card)
+    await call.answer()
+
+
+@infra_router.message(DnsRecordState.waiting_for_dns_input)
+async def process_dns_record_input(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    await state.clear()
+    parts = raw.split()
+    if len(parts) == 2:
+        name, value = parts[0], parts[1]
+        rtype = "A"
+    elif len(parts) == 3 and parts[1].upper() in ("A", "CNAME"):
+        name, rtype, value = parts[0], parts[1].upper(), parts[2]
+    else:
+        await send_rich(message, render_bubble_card(
+            title="❌ Неверный формат",
+            badge="DNS",
+            body_lines=[
+                "Используйте: <code>имя IP</code> (для A) или <code>имя CNAME цель</code>.",
+                "Пример: <code>gitlab 192.168.202.50</code>",
+            ],
+            buttons=[button_row(callback_button("⬅️ В меню сети", "menu:net", "link"))],
+        ))
+        return
+
+    res = await add_dns_record(name=name, value=value, record_type=rtype)
+    ok = bool(res.get("ok"))
+    await log_audit_action(
+        admin_id=message.from_user.id,
+        admin_username=message.from_user.username,
+        action="DNS_ADD_RECORD",
+        target=f"{name} ({rtype}) -> {value}",
+        status="SUCCESS" if ok else "FAILED",
+    )
+
+    if ok:
+        card = render_bubble_card(
+            title="✅ DNS-запись добавлена",
+            badge=res.get("type", rtype),
+            body_lines=[
+                f"<b>FQDN:</b> <code>{html_text(res.get('fqdn', name))}</code>",
+                f"<b>Тип:</b> <code>{html_text(res.get('type', rtype))}</code>",
+                f"<b>Значение:</b> <code>{html_text(res.get('value', value))}</code>",
+            ],
+            buttons=[
+                button_row(callback_button("➕ Добавить еще", "net:dns_add", "success")),
+                button_row(callback_button("⬅️ В меню сети", "menu:net", "link")),
+            ],
+        )
+    else:
+        card = render_bubble_card(
+            title="❌ Ошибка добавления DNS",
+            badge="DNS",
+            body_lines=[f"<code>{html_text(str(res.get('error', 'Ошибка')))}</code>"],
+            buttons=[button_row(callback_button("⬅️ В меню сети", "menu:net", "link"))],
+        )
+    await send_rich(message, card)
 
 
 @infra_router.callback_query(F.data == "net:custom")
