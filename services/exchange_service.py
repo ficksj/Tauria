@@ -409,33 +409,59 @@ async def enable_user_mailbox(
     db_clause = f" -Database '{database.strip()}'" if database and database.strip() else ""
     ps_script = f"""
     $ErrorActionPreference = 'Stop'
-    $sec = ConvertTo-SecureString '{ex_pass}' -AsPlainText -Force
-    $cred = New-Object System.Management.Automation.PSCredential('{ex_user}', $sec)
+    $uid = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $psPath = "$env:TEMP\\ex_mbx_$uid.ps1"
+    $outPath = "$env:TEMP\\ex_mbx_$uid.json"
+    $taskName = "TauriaExMbx_$uid"
 
-    Invoke-Command -ComputerName localhost -Credential $cred -ScriptBlock {{
-        $ErrorActionPreference = 'Stop'
-        try {{
-            Add-PSSnapin Microsoft.Exchange.Management.PowerShell.SnapIn -ErrorAction SilentlyContinue
-        }} catch {{}}
-
-        $existing = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
-        if ($existing) {{
-            @{{
-                already_exists = $true
-                primary_smtp = [string]$existing.PrimarySmtpAddress
-                database = [string]$existing.Database
-                alias = [string]$existing.Alias
-            }} | ConvertTo-Json -Compress
-            return
-        }}
-
-        $mbx = Enable-Mailbox -Identity '{clean_id}' -Alias '{clean_alias}'{db_clause} -ErrorAction Stop
+    $innerScript = @"
+`$ErrorActionPreference = 'Stop'
+try {{
+    Add-PSSnapin Microsoft.Exchange.Management.PowerShell.SnapIn -ErrorAction SilentlyContinue
+    `$existing = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
+    if (`$existing) {{
         @{{
-            already_exists = $false
-            primary_smtp = [string]$mbx.PrimarySmtpAddress
-            database = [string]$mbx.Database
-            alias = [string]$mbx.Alias
-        }} | ConvertTo-Json -Compress
+            ok = `$true
+            already_exists = `$true
+            primary_smtp = [string]`$existing.PrimarySmtpAddress
+            database = [string]`$existing.Database
+            alias = [string]`$existing.Alias
+        }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+        exit 0
+    }}
+    `$mbx = Enable-Mailbox -Identity '{clean_id}' -Alias '{clean_alias}'{db_clause} -ErrorAction Stop
+    @{{
+        ok = `$true
+        already_exists = `$false
+        primary_smtp = [string]`$mbx.PrimarySmtpAddress
+        database = [string]`$mbx.Database
+        alias = [string]`$mbx.Alias
+    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+}} catch {{
+    @{{
+        ok = `$false
+        error = `$_.Exception.Message
+    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+}}
+"@
+
+    Set-Content -Path $psPath -Value $innerScript -Encoding UTF8
+    try {{
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$psPath`""
+        Register-ScheduledTask -TaskName $taskName -Action $action -User '{ex_user}' -Password '{ex_pass}' -RunLevel Highest -Force | Out-Null
+        Start-ScheduledTask -TaskName $taskName
+        for ($i = 0; $i -lt 30; $i++) {{
+            Start-Sleep -Milliseconds 500
+            if (Test-Path $outPath) {{ break }}
+        }}
+        if (Test-Path $outPath) {{
+            Get-Content -Path $outPath -Raw -Encoding UTF8
+        }} else {{
+            '{{"ok":false,"error":"Таймаут ожидания результата задачи Exchange"}}'
+        }}
+    }} finally {{
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        Remove-Item -Path $psPath, $outPath -Force -ErrorAction SilentlyContinue
     }}
     """
 
@@ -448,6 +474,8 @@ async def enable_user_mailbox(
 
     try:
         data = json.loads(res.get("stdout", "{}"))
+        if not data.get("ok", True):
+            return {"ok": False, "error": str(data.get("error") or "Ошибка Exchange")}
         return {
             "ok": True,
             "already_exists": bool(data.get("already_exists", False)),
