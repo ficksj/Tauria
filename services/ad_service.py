@@ -1456,13 +1456,11 @@ class TauriaADService:
 
         with self._lock:
             self.ensure_connection()
-            entries = self._safe_search(self.base_dn, search_filter, attrs)
-
-        if not entries:
-            return {"ok": False, "error": "Компьютер не найден в AD"}
-
-        entry = entries[0]
-        entry_attrs = entry.entry_attributes_as_dict
+            ok = self._safe_search(self.base_dn, search_filter, attrs)
+            if not ok or not self.conn.entries:
+                return {"ok": False, "error": "Компьютер не найден в AD"}
+            entry = self.conn.entries[0]
+            entry_attrs = entry.entry_attributes_as_dict
         cn = str(_attr_val(entry_attrs, "cn", pc_name))
         pwd = _attr_val(entry_attrs, "ms-Mcs-AdmPwd") or _attr_val(entry_attrs, "msLAPS-Password")
         if not pwd:
