@@ -418,7 +418,7 @@ try {{
     Set-Content -Path $psPath -Value $innerScript -Encoding UTF8
     try {{
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$psPath`""
-        Register-ScheduledTask -TaskName $taskName -Action $action -User '{task_user}' -Password '{task_pass}' -RunLevel Highest -Force | Out-Null
+        Register-ScheduledTask -TaskName $taskName -Action $action -User 'NT AUTHORITY\SYSTEM' -RunLevel Highest -Force | Out-Null
         Start-ScheduledTask -TaskName $taskName
         for ($i = 0; $i -lt 60; $i++) {{
             Start-Sleep -Milliseconds 500
@@ -427,7 +427,11 @@ try {{
         if (Test-Path $outPath) {{
             Get-Content -Path $outPath -Raw -Encoding UTF8
         }} else {{
-            '{{"ok":false,"error":"Таймаут ожидания результата задачи Exchange"}}'
+            $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+            $t = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            $code = if ($info) {{ $info.LastTaskResult }} else {{ -1 }}
+            $st = if ($t) {{ [string]$t.State }} else {{ "Unknown" }}
+            @{{ ok = $false; error = "Таймаут Exchange задачи (State=$st, LastResult=$code)" }} | ConvertTo-Json -Compress
         }}
     }} finally {{
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
