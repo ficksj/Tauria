@@ -392,8 +392,8 @@ async def get_exchange_forwarding_audit() -> Dict[str, Any]:
 
 async def _run_exchange_task_ps(inner_ps: str, timeout: int = 35) -> Dict[str, Any]:
     """Запускает PowerShell-блок на сервере Exchange через одноразовый ScheduledTask (обход NTLM double-hop)."""
-    ex_user = (settings.exchange_user or settings.AD_USER or "").strip()
-    ex_pass = (settings.exchange_password or settings.AD_PASSWORD or "").replace("'", "''")
+    task_user = (settings.AD_USER or settings.exchange_user or "").strip()
+    task_pass = (settings.AD_PASSWORD or settings.exchange_password or "").replace("'", "''")
     ps_script = f"""
     $ErrorActionPreference = 'Stop'
     $uid = [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -417,7 +417,7 @@ try {{
     Set-Content -Path $psPath -Value $innerScript -Encoding UTF8
     try {{
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$psPath`""
-        Register-ScheduledTask -TaskName $taskName -Action $action -User '{ex_user}' -Password '{ex_pass}' -RunLevel Highest -Force | Out-Null
+        Register-ScheduledTask -TaskName $taskName -Action $action -User '{task_user}' -Password '{task_pass}' -RunLevel Highest -Force | Out-Null
         Start-ScheduledTask -TaskName $taskName
         for ($i = 0; $i -lt 30; $i++) {{
             Start-Sleep -Milliseconds 500
