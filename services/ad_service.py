@@ -1452,7 +1452,14 @@ class TauriaADService:
         """Возвращает LAPS-пароль и срок его действия для компьютера из AD."""
         safe_pc = escape_filter_chars(pc_name.strip())
         search_filter = f"(&(objectCategory=computer)(|(cn={safe_pc})(sAMAccountName={safe_pc}$)))"
-        attrs = ["cn", "ms-Mcs-AdmPwd", "ms-Mcs-AdmPwdExpirationTime", "msLAPS-Password"]
+        attrs = [
+            "cn",
+            "ms-Mcs-AdmPwd",
+            "ms-Mcs-AdmPwdExpirationTime",
+            "msLAPS-Password",
+            "msLAPS-EncryptedPassword",
+            "msLAPS-PasswordExpirationTime",
+        ]
 
         with self._lock:
             self.ensure_connection()
@@ -1462,11 +1469,7 @@ class TauriaADService:
             entry = self.conn.entries[0]
             entry_attrs = entry.entry_attributes_as_dict
         cn = str(_attr_val(entry_attrs, "cn", pc_name))
-        pwd = _attr_val(entry_attrs, "ms-Mcs-AdmPwd") or _attr_val(entry_attrs, "msLAPS-Password")
-        if not pwd:
-            return {"ok": False, "error": "LAPS-пароль не задан или нет прав чтения ms-Mcs-AdmPwd"}
-
-        exp_raw = _attr_val(entry_attrs, "ms-Mcs-AdmPwdExpirationTime")
+        exp_raw = _attr_val(entry_attrs, "msLAPS-PasswordExpirationTime") or _attr_val(entry_attrs, "ms-Mcs-AdmPwdExpirationTime")
         exp_str = "—"
         if exp_raw is not None:
             try:
@@ -1478,7 +1481,25 @@ class TauriaADService:
             except Exception:
                 pass
 
-        return {"ok": True, "pc_name": cn, "password": str(pwd), "expires": exp_str}
+        pwd = _attr_val(entry_attrs, "ms-Mcs-AdmPwd") or _attr_val(entry_attrs, "msLAPS-Password")
+        if pwd:
+            pwd_str = str(pwd)
+            if pwd_str.startswith("{"):
+                try:
+                    import json as _json
+                    parsed = _json.loads(pwd_str)
+                    pwd_str = str(parsed.get("p") or pwd_str)
+                except Exception:
+                    pass
+            return {"ok": True, "pc_name": cn, "password": pwd_str, "expires": exp_str}
+
+        if _attr_val(entry_attrs, "msLAPS-EncryptedPassword"):
+            return {
+                "ok": False,
+                "error": f"Пароль зашифрован Windows LAPS (DPAPI-NG). Срок действия: {exp_str}. Расшифровка доступна только в ADUC или через Get-LapsADPassword.",
+            }
+
+        return {"ok": False, "error": "LAPS-пароль не задан или нет прав чтения"}
 
 
 ad_service = TauriaADService()
