@@ -102,6 +102,7 @@ def main_menu_keyboard(dry_run: bool = False) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=f"🔐 Доступы к дискам (RO / RW){mode_badge}", callback_data="drv:access")],
             [InlineKeyboardButton(text="👤 Диски пользователя / Отключить", callback_data="drv:user_drives")],
             [InlineKeyboardButton(text="📁 Поиск по шаре (кто подключён)", callback_data="drv:share_users")],
+            [InlineKeyboardButton(text="🛡 Аудит безопасности шар", callback_data="drv:sec_audit")],
             [
                 InlineKeyboardButton(text="📜 Журнал / Откат", callback_data="drv:audit"),
                 InlineKeyboardButton(text="🔄 Обновить шары", callback_data="drv:refresh_shares"),

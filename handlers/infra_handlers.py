@@ -24,7 +24,12 @@ from services.exchange_service import (
     get_exchange_forwarding_audit,
     enable_user_mailbox,
     disable_user_mailbox,
+    get_mailbox_details,
+    set_mailbox_hidden_gal,
+    grant_mailbox_full_access,
+    set_mailbox_forwarding,
 )
+from handlers.states import ExchangeActionState
 from services.playbooks_service import get_playbooks_list, execute_playbook, PLAYBOOKS
 from services.terminal_service import run_quick_command
 from services.db_service import log_audit_action
@@ -614,6 +619,237 @@ async def process_net_custom_target(message: Message, state: FSMContext):
         buttons=buttons,
     )
     await send_rich(message, card)
+
+
+@infra_router.callback_query(F.data.startswith("exchange:menu:"))
+async def cb_exchange_user_menu(call: CallbackQuery):
+    username = call.data.split(":", 2)[2].strip()
+    await call.answer(f"📧 Загружаю данные ящика {username}...", show_alert=False)
+
+    res = await get_mailbox_details(username)
+    if not res.get("ok"):
+        card = render_bubble_card(
+            title="❌ Ошибка Exchange",
+            badge="Exchange",
+            body_lines=[f"Не удалось получить данные для <code>{html_text(username)}</code>:\n<code>{html_text(str(res.get('error', 'Ошибка')))}</code>"],
+            buttons=[
+                button_row(callback_button("👤 В карточку сотрудника", f"user:show:{username}", "primary")),
+                button_row(callback_button("⬅️ Главное меню", "menu:home", "link")),
+            ],
+        )
+        await edit_rich(call.message, card)
+        return
+
+    if not res.get("exists"):
+        card = render_bubble_card(
+            title="📧 Почта Exchange",
+            badge="Не создан",
+            body_lines=[
+                f"<b>Сотрудник:</b> <code>{html_text(username)}</code>",
+                "Почтовый ящик Exchange отсутствует.",
+            ],
+            buttons=[
+                button_row(callback_button("➕ Создать почту", f"exchange:mbx_user:{username}", "success")),
+                button_row(callback_button("👤 В карточку сотрудника", f"user:show:{username}", "primary")),
+            ],
+        )
+        await edit_rich(call.message, card)
+        return
+
+    hidden_gal = bool(res.get("hidden_from_gal", False))
+    gal_status = "🙈 Скрыт" if hidden_gal else "👁 Виден"
+    fwd = res.get("forwarding") or "—"
+    body = [
+        f"<b>Сотрудник:</b> <code>{html_text(username)}</code>",
+        f"<b>Email:</b> <code>{html_text(res.get('primary_smtp', '—'))}</code>",
+        f"<b>Размер:</b> <code>{html_text(res.get('total_size', '—'))}</code>",
+        f"<b>Писем:</b> <code>{res.get('item_count', 0)}</code>",
+        f"<b>База:</b> <code>{html_text(res.get('database', '—'))}</code>",
+        f"<b>Статус в GAL:</b> {gal_status}",
+        f"<b>Пересылка:</b> <code>{html_text(fwd)}</code>",
+    ]
+
+    gal_btn = (
+        callback_button("👁 Показать в GAL", f"exchange:gal_show:{username}", "secondary")
+        if hidden_gal
+        else callback_button("🙈 Скрыть из GAL", f"exchange:gal_hide:{username}", "secondary")
+    )
+    fwd_row = [callback_button("↪️ Пересылка писем", f"exchange:fwd:{username}", "primary")]
+    if res.get("forwarding"):
+        fwd_row.append(callback_button("❌ Отключить пересылку", f"exchange:fwd_off:{username}", "danger"))
+
+    buttons = [
+        button_row(gal_btn, callback_button("🤝 Выдать FullAccess", f"exchange:delegate:{username}", "primary")),
+        button_row(*fwd_row),
+        button_row(callback_button("🗑 Удалить почту", f"exchange:del_ask:{username}", "danger")),
+        button_row(callback_button("👤 В карточку сотрудника", f"user:show:{username}", "link")),
+    ]
+    card = render_bubble_card(
+        title="📧 Почта Exchange",
+        badge="Active Mailbox",
+        body_lines=body,
+        buttons=buttons,
+    )
+    await edit_rich(call.message, card)
+
+
+@infra_router.callback_query(F.data.startswith("exchange:gal_show:") | F.data.startswith("exchange:gal_hide:"))
+async def cb_exchange_gal_toggle(call: CallbackQuery):
+    action_key, _, username = call.data.partition(":")[2].partition(":")
+    hidden = action_key == "gal_hide"
+    await call.answer("⏳ Обновляю видимость в GAL...", show_alert=False)
+
+    res = await set_mailbox_hidden_gal(username, hidden=hidden)
+    ok = bool(res.get("ok"))
+    await log_audit_action(
+        admin_id=call.from_user.id,
+        admin_username=call.from_user.username,
+        action="EXCHANGE_HIDE_GAL" if hidden else "EXCHANGE_SHOW_GAL",
+        target=username,
+        status="SUCCESS" if ok else "FAILED",
+    )
+    if not ok:
+        card = render_bubble_card(
+            title="❌ Ошибка GAL",
+            badge="Exchange",
+            body_lines=[f"Не удалось обновить GAL для <code>{html_text(username)}</code>:\n<code>{html_text(str(res.get('error', 'Ошибка')))}</code>"],
+            buttons=[button_row(callback_button("⬅️ К ящику", f"exchange:menu:{username}", "primary"))],
+        )
+        await edit_rich(call.message, card)
+        return
+
+    await cb_exchange_user_menu(call)
+
+
+@infra_router.callback_query(F.data.startswith("exchange:delegate:"))
+async def cb_exchange_delegate_prompt(call: CallbackQuery, state: FSMContext):
+    username = call.data.split(":", 2)[2].strip()
+    await state.update_data(exchange_target_username=username)
+    await state.set_state(ExchangeActionState.waiting_for_delegate_user)
+    card = render_bubble_card(
+        title="🤝 Выдача FullAccess",
+        badge="Exchange",
+        body_lines=[
+            f"Ящик: <code>{html_text(username)}</code>",
+            "Введите <b>логин (sAMAccountName)</b> делегата, которому нужно выдать права FullAccess (с AutoMapping):",
+        ],
+        buttons=[button_row(callback_button("❌ Отмена", f"exchange:menu:{username}", "link"))],
+    )
+    await edit_rich(call.message, card)
+    await call.answer()
+
+
+@infra_router.message(ExchangeActionState.waiting_for_delegate_user)
+async def process_exchange_delegate_user(message: Message, state: FSMContext):
+    data = await state.get_data()
+    username = data.get("exchange_target_username", "")
+    delegate_user = (message.text or "").strip()
+    await state.clear()
+
+    res = await grant_mailbox_full_access(username, delegate_user)
+    ok = bool(res.get("ok"))
+    await log_audit_action(
+        admin_id=message.from_user.id,
+        admin_username=message.from_user.username,
+        action="EXCHANGE_GRANT_FULLACCESS",
+        target=f"{username} -> {delegate_user}",
+        status="SUCCESS" if ok else "FAILED",
+    )
+    if ok:
+        title = "✅ Права FullAccess выданы"
+        body = [f"Пользователю <code>{html_text(delegate_user)}</code> выданы права FullAccess на ящик <code>{html_text(username)}</code>."]
+    else:
+        title = "❌ Ошибка выдачи прав"
+        body = [f"<code>{html_text(str(res.get('error', 'Ошибка')))}</code>"]
+
+    card = render_bubble_card(
+        title=title,
+        badge="Exchange",
+        body_lines=body,
+        buttons=[button_row(callback_button("📧 К ящику", f"exchange:menu:{username}", "primary"))],
+    )
+    await send_rich(message, card)
+
+
+@infra_router.callback_query(F.data.startswith("exchange:fwd:"))
+async def cb_exchange_forward_prompt(call: CallbackQuery, state: FSMContext):
+    username = call.data.split(":", 2)[2].strip()
+    await state.update_data(exchange_target_username=username)
+    await state.set_state(ExchangeActionState.waiting_for_forward_email)
+    card = render_bubble_card(
+        title="↪️ Пересылка писем",
+        badge="Exchange",
+        body_lines=[
+            f"Ящик: <code>{html_text(username)}</code>",
+            "Введите <b>Email-адрес</b>, на который нужно пересылать входящие письма (копия останется в ящике):",
+        ],
+        buttons=[
+            button_row(callback_button("❌ Отключить пересылку", f"exchange:fwd_off:{username}", "danger")),
+            button_row(callback_button("⬅️ Отмена", f"exchange:menu:{username}", "link")),
+        ],
+    )
+    await edit_rich(call.message, card)
+    await call.answer()
+
+
+@infra_router.message(ExchangeActionState.waiting_for_forward_email)
+async def process_exchange_forward_email(message: Message, state: FSMContext):
+    data = await state.get_data()
+    username = data.get("exchange_target_username", "")
+    target_email = (message.text or "").strip()
+    await state.clear()
+
+    res = await set_mailbox_forwarding(username, target_email)
+    ok = bool(res.get("ok"))
+    await log_audit_action(
+        admin_id=message.from_user.id,
+        admin_username=message.from_user.username,
+        action="EXCHANGE_SET_FORWARDING",
+        target=f"{username} -> {target_email}",
+        status="SUCCESS" if ok else "FAILED",
+    )
+    if ok:
+        title = "✅ Пересылка настроена"
+        body = [f"Письма для <code>{html_text(username)}</code> теперь пересылаются на <code>{html_text(target_email)}</code>."]
+    else:
+        title = "❌ Ошибка настройки пересылки"
+        body = [f"<code>{html_text(str(res.get('error', 'Ошибка')))}</code>"]
+
+    card = render_bubble_card(
+        title=title,
+        badge="Exchange",
+        body_lines=body,
+        buttons=[button_row(callback_button("📧 К ящику", f"exchange:menu:{username}", "primary"))],
+    )
+    await send_rich(message, card)
+
+
+@infra_router.callback_query(F.data.startswith("exchange:fwd_off:"))
+async def cb_exchange_forward_off(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    username = call.data.split(":", 2)[2].strip()
+    await call.answer("⏳ Отключаю пересылку...", show_alert=False)
+
+    res = await set_mailbox_forwarding(username, None)
+    ok = bool(res.get("ok"))
+    await log_audit_action(
+        admin_id=call.from_user.id,
+        admin_username=call.from_user.username,
+        action="EXCHANGE_DISABLE_FORWARDING",
+        target=username,
+        status="SUCCESS" if ok else "FAILED",
+    )
+    if not ok:
+        card = render_bubble_card(
+            title="❌ Ошибка отключения пересылки",
+            badge="Exchange",
+            body_lines=[f"<code>{html_text(str(res.get('error', 'Ошибка')))}</code>"],
+            buttons=[button_row(callback_button("⬅️ К ящику", f"exchange:menu:{username}", "primary"))],
+        )
+        await edit_rich(call.message, card)
+        return
+
+    await cb_exchange_user_menu(call)
 
 
 @infra_router.callback_query(F.data.startswith("exchange:mbx_user:"))

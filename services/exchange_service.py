@@ -523,3 +523,122 @@ async def disable_user_mailbox(identity: str) -> Dict[str, Any]:
         "ok": True,
         "primary_smtp": str(data.get("primary_smtp") or "—"),
     }
+
+
+async def get_mailbox_details(identity: str) -> Dict[str, Any]:
+    """Возвращает детальную информацию о почтовом ящике Exchange и его статистику."""
+    clean_id = (identity or "").strip()
+    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+        return {"ok": False, "error": "Некорректный логин пользователя"}
+
+    inner_ps = f"""
+    `$mbx = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
+    if (-not `$mbx) {{
+        @{{
+            ok = `$true
+            exists = `$false
+        }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+        exit 0
+    }}
+    `$stats = Get-MailboxStatistics -Identity '{clean_id}' -ErrorAction SilentlyContinue
+    `$totalSize = if (`$stats -and `$stats.TotalItemSize) {{ [string]`$stats.TotalItemSize }} else {{ "—" }}
+    `$itemCount = if (`$stats -and `$null -ne `$stats.ItemCount) {{ [int]`$stats.ItemCount }} else {{ 0 }}
+    `$fwd = if (`$mbx.ForwardingSmtpAddress) {{ [string]`$mbx.ForwardingSmtpAddress }} else {{ "" }}
+    @{{
+        ok = `$true
+        exists = `$true
+        primary_smtp = [string]`$mbx.PrimarySmtpAddress
+        database = [string]`$mbx.Database
+        alias = [string]`$mbx.Alias
+        hidden_from_gal = [bool]`$mbx.HiddenFromAddressListsEnabled
+        forwarding = `$fwd
+        total_size = `$totalSize
+        item_count = `$itemCount
+    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    """
+    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    if not data.get("ok"):
+        return {"ok": False, "error": data.get("error") or "Не удалось получить данные почтового ящика"}
+    if not data.get("exists"):
+        return {"ok": True, "exists": False}
+    return {
+        "ok": True,
+        "exists": True,
+        "primary_smtp": str(data.get("primary_smtp") or "—"),
+        "database": str(data.get("database") or "—"),
+        "alias": str(data.get("alias") or clean_id),
+        "hidden_from_gal": bool(data.get("hidden_from_gal", False)),
+        "forwarding": str(data.get("forwarding") or "").strip(),
+        "total_size": str(data.get("total_size") or "—"),
+        "item_count": int(data.get("item_count") or 0),
+    }
+
+
+async def set_mailbox_hidden_gal(identity: str, hidden: bool) -> Dict[str, Any]:
+    """Скрывает или показывает почтовый ящик в глобальной адресной книге (GAL)."""
+    clean_id = (identity or "").strip()
+    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+        return {"ok": False, "error": "Некорректный логин пользователя"}
+
+    ps_bool = "true" if hidden else "false"
+    inner_ps = f"""
+    Set-Mailbox -Identity '{clean_id}' -HiddenFromAddressListsEnabled `${ps_bool} -ErrorAction Stop
+    @{{
+        ok = `$true
+        hidden_from_gal = `${ps_bool}
+    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    """
+    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    if not data.get("ok"):
+        return {"ok": False, "error": data.get("error") or "Не удалось обновить видимость в GAL"}
+    return {"ok": True, "hidden_from_gal": hidden}
+
+
+async def grant_mailbox_full_access(mailbox_id: str, delegate_user: str) -> Dict[str, Any]:
+    """Выдает права FullAccess (с AutoMapping) указанному делегату на почтовый ящик."""
+    clean_id = (mailbox_id or "").strip()
+    clean_delegate = (delegate_user or "").strip()
+    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+        return {"ok": False, "error": "Некорректный логин ящика"}
+    if not clean_delegate or any(c in clean_delegate for c in ("'", '"', ";", "`", "$", " ")):
+        return {"ok": False, "error": "Некорректный логин делегата"}
+
+    inner_ps = f"""
+    Add-MailboxPermission -Identity '{clean_id}' -User '{clean_delegate}' -AccessRights FullAccess -InheritanceType All -AutoMapping `$true -ErrorAction Stop | Out-Null
+    @{{
+        ok = `$true
+        mailbox_id = '{clean_id}'
+        delegate_user = '{clean_delegate}'
+    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    """
+    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    if not data.get("ok"):
+        return {"ok": False, "error": data.get("error") or "Не удалось выдать права FullAccess"}
+    return {"ok": True, "mailbox_id": clean_id, "delegate_user": clean_delegate}
+
+
+async def set_mailbox_forwarding(identity: str, target_email: str | None) -> Dict[str, Any]:
+    """Настраивает или отключает пересылку писем (ForwardingSmtpAddress) для почтового ящика."""
+    clean_id = (identity or "").strip()
+    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+        return {"ok": False, "error": "Некорректный логин пользователя"}
+
+    clean_target = (target_email or "").strip()
+    if clean_target:
+        if any(c in clean_target for c in ("'", '"', ";", "`", "$", " ")) or "@" not in clean_target:
+            return {"ok": False, "error": "Некорректный email для пересылки"}
+        ps_cmd = f"Set-Mailbox -Identity '{clean_id}' -ForwardingSmtpAddress '{clean_target}' -DeliverToMailboxAndForward `$true -ErrorAction Stop"
+    else:
+        ps_cmd = f"Set-Mailbox -Identity '{clean_id}' -ForwardingSmtpAddress `$null -ErrorAction Stop"
+
+    inner_ps = f"""
+    {ps_cmd}
+    @{{
+        ok = `$true
+        forwarding = '{clean_target}'
+    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    """
+    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    if not data.get("ok"):
+        return {"ok": False, "error": data.get("error") or "Не удалось обновить пересылку писем"}
+    return {"ok": True, "forwarding": clean_target}

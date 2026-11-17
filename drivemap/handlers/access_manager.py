@@ -787,3 +787,84 @@ async def cb_acl_remove_direct_ace(
             reply_markup=access_direct_users_keyboard(new_direct, page=0),
         )
         await track_panel(state, edited)
+
+
+@router.callback_query(F.data == "drv:sec_audit")
+async def cb_share_security_audit(
+    callback: CallbackQuery,
+    state: FSMContext,
+    shares_svc: ShareDiscoveryService,
+    access_engine: ShareAccessEngine,
+) -> None:
+    await callback.answer("⏳ Сканирую ACL шар...")
+    try:
+        shares = await shares_svc.get_shares()
+    except Exception as exc:
+        if callback.message:
+            edited = await safe_edit_text(
+                callback.message,
+                f"🛡 <b>Аудит безопасности шар</b>\n\n❌ Не удалось получить список шар: <code>{h(str(exc))}</code>",
+                reply_markup=back_home_keyboard(back_text="⬅️ В меню дисков"),
+            )
+            await track_panel(state, edited)
+        return
+
+    target_shares = shares[:15]
+    findings: list[str] = []
+    unreadable_count = 0
+
+    for share in target_shares:
+        try:
+            report = await access_engine.inspect_share_access(share.unc_path)
+        except Exception as exc:
+            unreadable_count += 1
+            logger.warning("Share audit failed for %s: %s", share.unc_path, exc)
+            continue
+
+        if not report.readable:
+            unreadable_count += 1
+            continue
+
+        share_risks: list[str] = []
+        for entry in report.entries:
+            if entry.is_deny:
+                continue
+            sid_upper = entry.sid.upper()
+            pname_lower = (entry.principal_name or "").lower()
+
+            if (sid_upper == "S-1-1-0" or "everyone" in pname_lower) and entry.level in {"RW", "FULL"}:
+                share_risks.append(f"Everyone ({h(entry.level)})")
+            elif (
+                sid_upper == "S-1-5-32-545"
+                or "builtin\\users" in pname_lower
+                or pname_lower == "users"
+            ) and entry.level in {"RW", "FULL"}:
+                share_risks.append(f"BUILTIN\\Users ({h(entry.level)})")
+            elif sid_upper.startswith("S-1-5-21-") and (
+                entry.principal_type == "UNKNOWN" or entry.principal_name.upper().startswith("S-1-5-21-")
+            ):
+                share_risks.append(f"Мёртвый SID <code>{h(entry.sid)}</code> ({h(entry.level)})")
+
+        if share_risks:
+            findings.append(f"• <code>{h(share.unc_path)}</code>: " + ", ".join(share_risks))
+
+    lines = [
+        "🛡 <b>Аудит безопасности шар</b>",
+        f"Проверено шар: <b>{len(target_shares)}</b> (недоступно: {unreadable_count})",
+        "",
+    ]
+    if findings:
+        lines.append("⚠️ <b>Обнаружены потенциальные риски:</b>")
+        lines.extend(findings[:20])
+        if len(findings) > 20:
+            lines.append(f"… и ещё {len(findings) - 20} шар(ы)")
+    else:
+        lines.append("✅ Опасных записей (Everyone/Users RW+ и мёртвых SID) не обнаружено.")
+
+    if callback.message:
+        edited = await safe_edit_text(
+            callback.message,
+            "\n".join(lines),
+            reply_markup=back_home_keyboard(back_text="⬅️ В меню дисков"),
+        )
+        await track_panel(state, edited)

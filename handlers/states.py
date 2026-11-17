@@ -44,3 +44,8 @@ class CreateUserState(StatesGroup):
     waiting_for_sz_info = State()
     waiting_for_intern_duration = State()
     waiting_for_department = State()
+
+
+class ExchangeActionState(StatesGroup):
+    waiting_for_delegate_user = State()
+    waiting_for_forward_email = State()

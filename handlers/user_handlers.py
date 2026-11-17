@@ -152,8 +152,7 @@ def render_user_profile(
             cert_btn,
         ),
         button_row(
-            callback_button("📧 Создать почту", f"exchange:mbx_user:{username}", "success"),
-            callback_button("🗑 Удалить почту", f"exchange:del_ask:{username}", "danger"),
+            callback_button("📧 Почта Exchange", f"exchange:menu:{username}", "primary"),
         ),
         button_row(
             callback_button("📄 Акт техники", f"user:act:{username}", "primary"),

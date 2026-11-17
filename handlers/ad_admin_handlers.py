@@ -1051,10 +1051,20 @@ async def cb_confirm_offboard(call: CallbackQuery):
             f"✅ Сотрудник <code>{html_text(username)}</code> успешно уволен и заблокирован!",
             f"Перемещение в Disabled OU: {'Да' if res.get('moved') else 'Не настроено'}"
         ]
+        buttons = [
+            button_row(
+                callback_button("🙈 Скрыть из GAL (Exchange)", f"exchange:gal_hide:{username}", "secondary"),
+                callback_button("🗑 Удалить почту Exchange", f"exchange:del_ask:{username}", "danger"),
+            ),
+            button_row(
+                callback_button("🗄 Диски сотрудника (GPO)", f"drv:user:{username}", "primary"),
+            ),
+            button_row(callback_button("⬅️ Назад в AD", "menu:ad", "link")),
+        ]
     else:
         body = [f"❌ Не удалось выполнить операцию: {html_text(res.get('error', 'Ошибка'))}"]
+        buttons = [button_row(callback_button("⬅️ Назад в AD", "menu:ad", "link"))]
 
-    buttons = [button_row(callback_button("⬅️ Назад в AD", "menu:ad", "link"))]
     card = render_bubble_card(
         title="🚨 Результат увольнения",
         badge="Offboarding",

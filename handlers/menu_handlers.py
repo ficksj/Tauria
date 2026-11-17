@@ -9,6 +9,7 @@ from config import settings
 from services.ad_service import ad_service
 from services.db_service import get_recent_audit_logs, list_pending_lotus_transfers
 from services.export_service import export_audit_csv
+from services.audit_pack_service import generate_kpmg_audit_zip
 from services.rich_message_service import (
     render_bubble_card,
     button_row,
@@ -150,7 +151,10 @@ async def cb_audit(call: CallbackQuery):
             body.append(f"{st} <code>{time_str}</code> | <b>{html_text(row['action'])}</b> [{html_text(row['target'])}] by @{html_text(row['admin_username'])}")
 
     buttons = [
-        button_row(callback_button("📥 Выгрузить CSV", "audit:export", "primary")),
+        button_row(
+            callback_button("📥 Выгрузить CSV", "audit:export", "primary"),
+            callback_button("📦 Пакет KPMG / ГТС", "audit:kpmg_pack", "secondary"),
+        ),
         button_row(callback_button("⬅️ Главное меню", "menu:home", "link")),
     ]
     card = render_bubble_card(title="📋 Журнал аудита", badge="Audit DB", body_lines=body, buttons=buttons)
@@ -170,6 +174,21 @@ async def cb_audit_export(call: CallbackQuery):
     finally:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
+
+
+@menu_router.callback_query(F.data == "audit:kpmg_pack")
+async def cb_audit_kpmg_pack(call: CallbackQuery):
+    await call.answer("⏳ Собираю пакет KPMG / ГТС...")
+    zip_path = None
+    try:
+        zip_path = await generate_kpmg_audit_zip()
+        await call.message.answer_document(
+            FSInputFile(zip_path),
+            caption="📦 Пакет аудита KPMG / ГТС (AD + Exchange + сводный отчёт)"
+        )
+    finally:
+        if zip_path and os.path.exists(zip_path):
+            os.remove(zip_path)
 
 # ==========================================
 # 5. Kolins Support Bot Management
