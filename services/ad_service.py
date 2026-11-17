@@ -1448,5 +1448,39 @@ class TauriaADService:
         res["failed_groups"] = failed_groups
         return res
 
+    def get_computer_laps_password(self, pc_name: str) -> dict:
+        """Возвращает LAPS-пароль и срок его действия для компьютера из AD."""
+        safe_pc = escape_filter_chars(pc_name.strip())
+        search_filter = f"(&(objectCategory=computer)(|(cn={safe_pc})(sAMAccountName={safe_pc}$)))"
+        attrs = ["cn", "ms-Mcs-AdmPwd", "ms-Mcs-AdmPwdExpirationTime", "msLAPS-Password"]
+
+        with self._lock:
+            self.ensure_connection()
+            entries = self._safe_search(settings.AD_BASE_DN, search_filter, attrs)
+
+        if not entries:
+            return {"ok": False, "error": "Компьютер не найден в AD"}
+
+        entry = entries[0]
+        entry_attrs = entry.entry_attributes_as_dict
+        cn = str(_attr_val(entry_attrs, "cn", pc_name))
+        pwd = _attr_val(entry_attrs, "ms-Mcs-AdmPwd") or _attr_val(entry_attrs, "msLAPS-Password")
+        if not pwd:
+            return {"ok": False, "error": "LAPS-пароль не задан или нет прав чтения ms-Mcs-AdmPwd"}
+
+        exp_raw = _attr_val(entry_attrs, "ms-Mcs-AdmPwdExpirationTime")
+        exp_str = "—"
+        if exp_raw is not None:
+            try:
+                ft = int(exp_raw)
+                if ft > 0:
+                    epoch = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
+                    dt_utc = epoch + datetime.timedelta(microseconds=ft // 10)
+                    exp_str = dt_utc.astimezone(TZ_LOCAL).strftime("%d.%m.%Y %H:%M")
+            except Exception:
+                pass
+
+        return {"ok": True, "pc_name": cn, "password": str(pwd), "expires": exp_str}
+
 
 ad_service = TauriaADService()

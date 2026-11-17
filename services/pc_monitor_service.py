@@ -604,6 +604,68 @@ def kill_remote_processes(
     return False, err_code or "error"
 
 
+def run_gpupdate_remote(pc_name: str, dns_name: str = "") -> tuple[bool, str]:
+    """Удаленно запускает gpupdate /force на ПК через WinRM."""
+    target = _resolve_target(pc_name, dns_name)
+    script = """
+    try {
+        cmd /c "echo N | gpupdate /force /wait:0" | Out-Null
+        Write-Output "__GPUPDATE_OK__"
+    } catch {
+        Write-Output ("__GPUPDATE_ERR__:" + $_.Exception.Message)
+    }
+    """
+    ok, output, err_code = _exec_remote_ps(target, script, timeout=20)
+    if ok and "__GPUPDATE_OK__" in output:
+        return True, "Групповые политики обновлены"
+    return False, err_code or output or "Ошибка выполнения gpupdate"
+
+
+def logoff_remote_session(pc_name: str, dns_name: str = "") -> tuple[bool, str]:
+    """Завершает все активные/отключенные пользовательские сеансы на ПК через WinRM."""
+    target = _resolve_target(pc_name, dns_name)
+    script = r"""
+    try {
+        $lines = quser 2>$null
+        if (-not $lines) {
+            Write-Output "__LOGOFF_NONE__"
+            exit 0
+        }
+        $count = 0
+        foreach ($line in $lines | Select-Object -Skip 1) {
+            $trimmed = $line.Trim()
+            if (-not $trimmed) { continue }
+            $parts = $trimmed -split '\s+'
+            if ($parts.Count -lt 3) { continue }
+            $sessionId = $null
+            foreach ($p in $parts) {
+                if ($p -match '^\d+$') {
+                    $sessionId = $p
+                    break
+                }
+            }
+            if ($sessionId -and $trimmed -notmatch '\bservices\b') {
+                logoff $sessionId 2>$null
+                $count++
+            }
+        }
+        if ($count -gt 0) {
+            Write-Output "__LOGOFF_OK__"
+        } else {
+            Write-Output "__LOGOFF_NONE__"
+        }
+    } catch {
+        Write-Output ("__LOGOFF_ERR__:" + $_.Exception.Message)
+    }
+    """
+    ok, output, err_code = _exec_remote_ps(target, script, timeout=12)
+    if ok and "__LOGOFF_OK__" in output:
+        return True, "Сеанс(ы) завершены"
+    if ok and "__LOGOFF_NONE__" in output:
+        return False, "Активные пользовательские сеансы не найдены"
+    return False, err_code or output or "Ошибка завершения сеанса"
+
+
 async def find_pc_by_username_scan(
     target_username: str,
     computer_list: list[str],

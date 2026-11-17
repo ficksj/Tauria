@@ -15,11 +15,14 @@ from services.pc_monitor_service import (
     check_pc_online,
     get_pc_diagnostics,
     get_pc_logged_user_detailed,
+    logoff_remote_session,
     reboot_remote_pc_detailed,
+    run_gpupdate_remote,
 )
 from services.rich_message_service import (
     button_row,
     callback_button,
+    copy_button,
     edit_rich,
     edit_rich_by_ids,
     html_text,
@@ -93,7 +96,14 @@ def render_pc_profile(
             callback_button("📦 В notebooklenovo", f"pc:move:{name}", "primary"),
         ),
         button_row(
+            callback_button("🔐 LAPS Пароль", f"pc:laps:{name}", "primary"),
+            callback_button("🔄 gpupdate /force", f"pc:gpupdate:{name}", "primary"),
+        ),
+        button_row(
+            callback_button("🚪 Logoff сеанса", f"pc:logoff_ask:{name}", "danger"),
             callback_button("🔄 Перезагрузить", f"pc:reboot_confirm:{name}", "danger"),
+        ),
+        button_row(
             callback_button("🗑 Удалить из AD", f"pc:delete_confirm:{name}", "danger"),
         ),
         button_row(
@@ -532,5 +542,89 @@ async def handle_pc_action(callback: CallbackQuery, state: FSMContext):
             badge=badge,
             body_lines=[result_text],
             buttons=[button_row(callback_button("🏠 Главное меню", "home:main", "link"))],
+        )
+        await edit_rich(callback.message, card)
+        return
+
+    if action == "laps":
+        res = await asyncio.to_thread(ad_service.get_computer_laps_password, value)
+        ok = bool(res.get("ok"))
+        await send_audit_log(callback.bot, callback.from_user, "LAPS_PASSWORD_VIEW", value, status=ok)
+        if not ok:
+            card = render_bubble_card(
+                title="🔐 LAPS Пароль",
+                badge="Ошибка",
+                body_lines=[html_text(res.get("error", "Не удалось получить LAPS-пароль"))],
+                buttons=[button_row(callback_button("💻 К карточке ПК", f"pc:show:{value}", "link"))],
+            )
+            await edit_rich(callback.message, card)
+            return
+
+        pwd = res["password"]
+        expires = res.get("expires", "—")
+        card = render_bubble_card(
+            title=f"🔐 LAPS Пароль · {html_text(res.get('pc_name', value))}",
+            badge="LAPS",
+            body_lines=[
+                f"<b>Пароль:</b> <code>{html_text(pwd)}</code>",
+                f"<b>Срок действия:</b> <code>{html_text(expires)}</code>",
+            ],
+            buttons=[
+                button_row(copy_button("📋 Скопировать пароль", pwd)),
+                button_row(callback_button("💻 К карточке ПК", f"pc:show:{value}", "link")),
+            ],
+        )
+        await edit_rich(callback.message, card)
+        return
+
+    if action == "gpupdate":
+        await edit_rich(
+            callback.message,
+            render_bubble_card(
+                title=f"🔄 gpupdate /force · {html_text(value)}",
+                badge="WinRM",
+                body_lines=["⏳ Применение групповых политик на удаленном ПК..."],
+            ),
+        )
+        ok, msg = await asyncio.to_thread(run_gpupdate_remote, value)
+        if not ok and msg == "auth_denied":
+            await edit_rich(callback.message, _auth_denied_card(value, f"pc:show:{value}"))
+            return
+        card = render_bubble_card(
+            title=f"🔄 gpupdate /force · {html_text(value)}",
+            badge="Успешно" if ok else "Ошибка",
+            body_lines=[html_text(msg)],
+            buttons=[button_row(callback_button("💻 К карточке ПК", f"pc:show:{value}", "link"))],
+        )
+        await edit_rich(callback.message, card)
+        return
+
+    if action == "logoff_ask":
+        card = render_bubble_card(
+            title="🚪 Подтверждение Logoff",
+            badge="Осторожно",
+            body_lines=[
+                f"Вы действительно хотите завершить пользовательский сеанс на <code>{html_text(value)}</code>?",
+                "Несохраненные данные пользователя могут быть потеряны.",
+            ],
+            buttons=[
+                button_row(callback_button("⚠️ Да, завершить сеанс", f"pc:logoff_confirm:{value}", "danger")),
+                button_row(callback_button("❌ Отмена", f"pc:show:{value}", "link")),
+            ],
+        )
+        await edit_rich(callback.message, card)
+        return
+
+    if action == "logoff_confirm":
+        ok, msg = await asyncio.to_thread(logoff_remote_session, value)
+        await send_audit_log(callback.bot, callback.from_user, "PC_LOGOFF", value, status=ok)
+        if not ok and msg == "auth_denied":
+            await edit_rich(callback.message, _auth_denied_card(value, f"pc:show:{value}"))
+            return
+        card = render_bubble_card(
+            title=f"🚪 Logoff сеанса · {html_text(value)}",
+            badge="Успешно" if ok else "Ошибка",
+            body_lines=[html_text(msg)],
+            buttons=[button_row(callback_button("💻 К карточке ПК", f"pc:show:{value}", "link"))],
         )
         await edit_rich(callback.message, card)
