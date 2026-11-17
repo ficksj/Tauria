@@ -491,6 +491,8 @@ async def handle_user_action(callback: CallbackQuery, state: FSMContext):
             buttons=[
                 button_row(callback_button("🎲 Случайный стойкий (12 симв.)", f"upw:rand:{username}", "danger")),
                 button_row(callback_button("🔑 Стандартный (ASDfg123+)", f"upw:def:{username}", "primary")),
+                button_row(callback_button("🎲 Стойкий (БЕЗ смены при входе)", f"upw:rand_nochange:{username}", "secondary")),
+                button_row(callback_button("🔑 ASDfg123+ (БЕЗ смены при входе)", f"upw:def_nochange:{username}", "secondary")),
                 button_row(callback_button("❌ Отмена", f"user:show:{username}", "link")),
             ],
         )
@@ -798,15 +800,22 @@ async def handle_password_reset_choice(callback: CallbackQuery):
     _, mode, username = callback.data.split(":", 2)
     await callback.answer()
 
-    new_password = _generate_strong_password(12) if mode == "rand" else "ASDfg123+"
-    success = await asyncio.to_thread(ad_service.reset_password, username, new_password, True)
+    is_rand = mode.startswith("rand")
+    must_change = not mode.endswith("_nochange")
+    new_password = _generate_strong_password(12) if is_rand else "ASDfg123+"
+    success = await asyncio.to_thread(ad_service.reset_password, username, new_password, must_change)
     await send_audit_log(callback.bot, callback.from_user, f"Сброс пароля ({mode})", username, status=success)
 
     if success:
+        change_note = (
+            "🔐 Включено требование смены пароля при следующем входе."
+            if must_change
+            else "🔓 Сброс выполнен <b>без требования смены пароля</b> при входе."
+        )
         body = [
             f"Пароль пользователя <code>{html_text(username)}</code> успешно сброшен.",
-            f"Новый временный пароль: <code>{html_text(new_password)}</code>",
-            "🔐 Включено требование смены пароля при следующем входе.",
+            f"Новый пароль: <code>{html_text(new_password)}</code>",
+            change_note,
         ]
         badge = "Успешно"
         buttons = [
