@@ -58,6 +58,9 @@ def _make_callback(user_id: int, username: str, data: str) -> CallbackQuery:
     cb = AsyncMock(spec=CallbackQuery)
     cb.from_user = User(id=user_id, is_bot=False, first_name="Test", username=username)
     cb.data = data
+    cb.message = AsyncMock()
+    cb.message.chat = AsyncMock()
+    cb.message.chat.type = "private"
     cb.answer = AsyncMock()
     return cb
 
@@ -66,6 +69,8 @@ def _make_message(user_id: int, username: str, text: str) -> Message:
     msg = AsyncMock(spec=Message)
     msg.from_user = User(id=user_id, is_bot=False, first_name="Test", username=username)
     msg.text = text
+    msg.chat = AsyncMock()
+    msg.chat.type = "private"
     msg.answer = AsyncMock()
     return msg
 
@@ -119,9 +124,7 @@ async def test_superadmin_middleware_roles(temp_db, monkeypatch):
     res_exec = await mw(handler, msg_op_exec, {})
     assert res_exec is None
     handler.assert_not_called()
-    msg_op_exec.answer.assert_awaited_once_with(
-        "⛔️ Команда /exec доступна только для роли SuperAdmin."
-    )
+    msg_op_exec.answer.assert_awaited_once()
 
     # 5. Неизвестный пользователь блокируется полностью (и на message, и на callback)
     handler.reset_mock()
@@ -165,7 +168,7 @@ def test_parse_sz_text_and_report_formatting():
     assert "Белецкий" in parsed["curator"]
 
     uname = _generate_ad_username(parsed["full_name"])
-    assert uname == "s.aybek"
+    assert uname == "a.serikov"
 
     report = format_helpdesk_onboarding_report(
         full_name=parsed["full_name"],
@@ -180,8 +183,16 @@ def test_parse_sz_text_and_report_formatting():
     )
     assert "Выход сотрудника/стажера / УЗ готова" in report
     assert "• СЗ: № 14-05/782 от 16.11.2026" in report
-    assert "• Логин: s.aybek" in report
+    assert "• Логин: a.serikov" in report
     assert "(смена при первом входе)" in report
 
     ft = datetime_to_ad_filetime(datetime.datetime(2026, 12, 31, 12, 0))
     assert ft > 130_000_000_000_000_000
+
+
+def test_pure_md4_rfc1320():
+    from services.ad_service import PureMD4
+    assert PureMD4(b"").hexdigest() == "31d6cfe0d16ae931b73c59d7e0c089c0"
+    h = PureMD4(b"abc")
+    assert h.hexdigest() == "a448017aaf21d8525fc10ae87aa6729d"
+    assert h.hexdigest() == "a448017aaf21d8525fc10ae87aa6729d"

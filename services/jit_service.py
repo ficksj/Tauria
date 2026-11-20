@@ -7,7 +7,7 @@ from config import settings
 from services.logger_service import log
 from services.ad_service import ad_service
 from services.db_service import create_jit_grant, get_active_jit_grants, mark_jit_revoked, log_audit_action
-from services.rich_message_service import send_rich_to_chat
+from services.rich_message_service import send_rich_to_chat, html_text
 
 class JITService:
     def __init__(self):
@@ -19,7 +19,8 @@ class JITService:
         username: str, 
         group_name: str, 
         duration_minutes: int, 
-        granted_by: int
+        granted_by: int,
+        admin_username: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Предоставление Just-In-Time (JIT) временных привилегий:
@@ -32,10 +33,11 @@ class JITService:
 
         granted_at_str = granted_at_dt.strftime("%Y-%m-%d %H:%M:%S")
         expires_at_str = expires_at_dt.strftime("%Y-%m-%d %H:%M:%S")
+        actor_name = admin_username or "SuperAdmin"
 
         log.info(
             f"Granting JIT access: user={username}, group={group_name}, "
-            f"duration={duration_minutes}m, granted_by={granted_by}"
+            f"duration={duration_minutes}m, granted_by={granted_by} ({actor_name})"
         )
 
         # 1. Добавляем пользователя в группу AD
@@ -45,7 +47,7 @@ class JITService:
             log.error(err_msg)
             await log_audit_action(
                 admin_id=granted_by,
-                admin_username="SuperAdmin",
+                admin_username=actor_name,
                 action="JIT_GRANT_FAILED",
                 target=f"{username} -> {group_name}",
                 status="FAILED",
@@ -70,7 +72,7 @@ class JITService:
         # 3. Аудит
         await log_audit_action(
             admin_id=granted_by,
-            admin_username="SuperAdmin",
+            admin_username=actor_name,
             action="JIT_GRANT",
             target=f"{username} -> {group_name}",
             status="SUCCESS",
@@ -115,10 +117,37 @@ class JITService:
 
                 # 1. Удаляем из группы в AD
                 remove_success = await ad_service.remove_user_from_group(username, group_name)
-                if not remove_success:
-                    log.warning(f"Could not remove {username} from {group_name} in AD (maybe already removed).")
+                recipients = set(settings.super_admins)
+                if settings.LOG_CHAT_ID:
+                    recipients.add(settings.LOG_CHAT_ID)
 
-                # 2. Помечаем в БД
+                if not remove_success:
+                    log.error(
+                        f"CRITICAL: Failed to remove {username} from {group_name} in AD for expired JIT grant #{grant_id}. "
+                        f"Grant remains active in DB for retry."
+                    )
+                    await log_audit_action(
+                        admin_id=0,
+                        admin_username="JIT_WORKER",
+                        action="JIT_REVOKE_FAILED",
+                        target=f"{username} -> {group_name}",
+                        status="FAILED",
+                        details=f"Grant ID: {grant_id}, Expired: {expires_str}. AD remove returned False."
+                    )
+                    alert_text = (
+                        f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА ОТЗЫВА JIT-ПРИВИЛЕГИЙ!</b>\n"
+                        f"Не удалось удалить <code>{html_text(username)}</code> из группы <b>{html_text(group_name)}</b> "
+                        f"(грант #{grant_id}).\n"
+                        f"Грант оставлен активным для повторной попытки — проверьте AD вручную!"
+                    )
+                    for chat_id in recipients:
+                        try:
+                            await send_rich_to_chat(bot, chat_id, alert_text)
+                        except Exception as ex:
+                            log.error(f"Failed to send critical JIT revoke alert to {chat_id}: {ex}")
+                    continue
+
+                # 2. Помечаем в БД только после успешного удаления из AD
                 revoked_at_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 await mark_jit_revoked(grant_id, revoked_at_str)
 
@@ -128,19 +157,15 @@ class JITService:
                     admin_username="JIT_WORKER",
                     action="JIT_REVOKED",
                     target=f"{username} -> {group_name}",
-                    status="SUCCESS" if remove_success else "PARTIAL",
+                    status="SUCCESS",
                     details=f"Grant ID: {grant_id}, Expired: {expires_str}, Revoked: {revoked_at_str}"
                 )
 
                 # 4. Отправляем уведомление супер-админам в Telegram
                 notify_text = (
                     f"⏳ <b>Срок временных привилегий истек!</b>\n"
-                    f"Пользователь <code>{username}</code> успешно удален из группы <b>{group_name}</b>."
+                    f"Пользователь <code>{html_text(username)}</code> успешно удален из группы <b>{html_text(group_name)}</b>."
                 )
-
-                recipients = set(settings.super_admins)
-                if settings.LOG_CHAT_ID:
-                    recipients.add(settings.LOG_CHAT_ID)
 
                 for chat_id in recipients:
                     try:
@@ -186,7 +211,12 @@ class JITService:
             except asyncio.CancelledError:
                 pass
 
-    async def revoke_grant_now(self, grant_id: int) -> dict:
+    async def revoke_grant_now(
+        self,
+        grant_id: int,
+        admin_id: int = 0,
+        admin_username: Optional[str] = None,
+    ) -> dict:
         """Досрочный отзыв активного JIT-гранта по ID."""
         active_grants = await get_active_jit_grants()
         grant = next((g for g in active_grants if g["id"] == grant_id), None)
@@ -195,17 +225,35 @@ class JITService:
 
         username = grant["username"]
         group_name = grant["group_name"]
+        actor_name = admin_username or "JIT_MANUAL_REVOKE"
 
         remove_success = await ad_service.remove_user_from_group(username, group_name)
+        if not remove_success:
+            await log_audit_action(
+                admin_id=admin_id,
+                admin_username=actor_name,
+                action="JIT_REVOKE_FAILED",
+                target=f"{username} -> {group_name}",
+                status="FAILED",
+                details=f"Manual early revoke failed in AD. Grant ID: {grant_id}"
+            )
+            return {
+                "success": False,
+                "error": f"Не удалось удалить '{username}' из группы '{group_name}' в AD. Грант оставлен активным.",
+                "grant_id": grant_id,
+                "username": username,
+                "group_name": group_name,
+            }
+
         revoked_at_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         await mark_jit_revoked(grant_id, revoked_at_str)
 
         await log_audit_action(
-            admin_id=0,
-            admin_username="JIT_MANUAL_REVOKE",
+            admin_id=admin_id,
+            admin_username=actor_name,
             action="JIT_REVOKED",
             target=f"{username} -> {group_name}",
-            status="SUCCESS" if remove_success else "PARTIAL",
+            status="SUCCESS",
             details=f"Manual early revoke. Grant ID: {grant_id}, Revoked: {revoked_at_str}"
         )
 
@@ -214,14 +262,22 @@ class JITService:
             "grant_id": grant_id,
             "username": username,
             "group_name": group_name,
-            "ad_removed": remove_success,
+            "ad_removed": True,
             "revoked_at": revoked_at_str,
         }
 
 jit_service = JITService()
 
-async def grant_temporary_access(username: str, group_name: str, duration_minutes: int, granted_by: int) -> Dict[str, Any]:
-    return await jit_service.grant_temporary_access(username, group_name, duration_minutes, granted_by)
+async def grant_temporary_access(
+    username: str,
+    group_name: str,
+    duration_minutes: int,
+    granted_by: int,
+    admin_username: Optional[str] = None,
+) -> Dict[str, Any]:
+    return await jit_service.grant_temporary_access(
+        username, group_name, duration_minutes, granted_by, admin_username=admin_username
+    )
 
 def start_jit_checker(bot: Bot, check_interval_sec: int = 30) -> asyncio.Task:
     return jit_service.start_jit_checker(bot, check_interval_sec)

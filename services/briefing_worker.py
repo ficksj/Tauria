@@ -1,8 +1,10 @@
 import asyncio
 import inspect
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from config import settings
+
+TZ_LOCAL = timezone(timedelta(hours=5))
 from services import db_service, infra_service
 from services.ad_service import ad_service
 from services.logger_service import log
@@ -71,7 +73,7 @@ async def build_briefing_card(buttons: list[str] | None = None) -> str:
         f"25: {'🟢' if smtp_ok else '🔴'} ({exch_25.get('rtt_ms', 0)}ms)"
     )
 
-    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+    now_str = datetime.now(TZ_LOCAL).strftime("%d.%m.%Y %H:%M")
 
     body_lines = [
         f"🖥️ <b>RAM:</b> {mem_percent}% ({mem_used}/{mem_total} GB)",
@@ -111,10 +113,10 @@ async def start_briefing_worker(bot):
     Фоновый цикл, который каждый день в 09:00 по локальному времени
     отправляет утренний брифинг всем settings.super_admins.
     """
-    log.info("Briefing worker started (daily at 09:00 local time).")
+    log.info("Briefing worker started (daily at 09:00 UTC+5).")
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(TZ_LOCAL)
             target = now.replace(hour=9, minute=0, second=0, microsecond=0)
             if now >= target:
                 target += timedelta(days=1)

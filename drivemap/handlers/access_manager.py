@@ -397,8 +397,11 @@ async def cb_acl_back_share(
 ) -> None:
     data = await state.get_data()
     unc_path = data.get("acc_unc", "")
+    if not unc_path:
+        await callback.answer("⚠️ Сессия устарела, выберите шару заново", show_alert=True)
+        return
     await callback.answer()
-    if callback.message and unc_path:
+    if callback.message:
         await _show_share_acl_view(callback.message, state, access_engine, unc_path, edit=True)
 
 
@@ -406,6 +409,9 @@ async def cb_acl_back_share(
 async def cb_acl_pick_user(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     unc_path = data.get("acc_unc", "")
+    if not unc_path:
+        await callback.answer("⚠️ Сессия устарела, выберите шару заново", show_alert=True)
+        return
     await state.set_state(AccessStates.searching_user)
     await state.update_data(acc_user_results=None, acc_user_query="")
     await callback.answer()

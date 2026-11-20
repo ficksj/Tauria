@@ -12,7 +12,6 @@ DB_PATH = settings.SHARED_DB_PATH.strip() if getattr(settings, "SHARED_DB_PATH",
 
 
 async def _apply_async_pragmas(db: aiosqlite.Connection) -> None:
-    await db.execute("PRAGMA journal_mode=WAL;")
     await db.execute("PRAGMA synchronous=NORMAL;")
     await db.execute("PRAGMA busy_timeout=15000;")
 
@@ -28,13 +27,12 @@ async def _get_async_conn(db_path: str | None = None):
 
 @contextmanager
 def _get_conn(db_path: str | None = None):
-    """Открывает синхронное SQLite-соединение в режиме WAL и закрывает его при выходе из контекста."""
+    """Открывает синхронное SQLite-соединение и закрывает его при выходе из контекста."""
     target_path = db_path or DB_PATH
     os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
     conn = sqlite3.connect(target_path, timeout=15.0)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA busy_timeout=15000;")
         yield conn
@@ -49,6 +47,7 @@ def _init_db_sync(db_path: str | None = None):
     """Синхронное создание таблиц и индексов (для безопасного вызова при старте или импорте)."""
     try:
         with _get_conn(db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -163,6 +162,7 @@ def _init_db_sync(db_path: str | None = None):
 
 async def init_db(db_path: str | None = None):
     async with _get_async_conn(db_path) as db:
+        await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS audit_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -393,13 +393,13 @@ def get_pc_user_session(pc_name: str) -> dict | None:
     """Получение сохраненного пользователя ПК из БД (обратный поиск по имени ПК)."""
     if not pc_name:
         return None
-    pc_clean = pc_name.strip()
+    pc_clean = pc_name.strip().upper()
     try:
         with _get_conn() as conn:
             row = conn.execute("""
                 SELECT username, dns_name, updated_at
                 FROM user_pc_sessions
-                WHERE UPPER(pc_name) = UPPER(?) OR UPPER(dns_name) LIKE UPPER(?)
+                WHERE pc_name = ? OR UPPER(dns_name) LIKE ?
                 ORDER BY updated_at DESC
                 LIMIT 1
             """, (pc_clean, f"{pc_clean}.%")).fetchone()
@@ -563,7 +563,7 @@ def save_lotus_transfer(
             conn.execute("""
                 UPDATE lotus_id_transfers
                 SET status = 'superseded'
-                WHERE UPPER(pc_name) = ? AND LOWER(win_profile) = LOWER(?)
+                WHERE pc_name = ? AND LOWER(win_profile) = LOWER(?)
                   AND LOWER(original_filename) = LOWER(?) AND status = 'extracted'
             """, (pc_clean, win_profile, original_filename))
 
@@ -611,7 +611,7 @@ def get_active_lotus_transfers_by_pc(pc_name: str) -> list[dict]:
         with _get_conn() as conn:
             rows = conn.execute("""
                 SELECT * FROM lotus_id_transfers
-                WHERE UPPER(pc_name) = ? AND status = 'extracted'
+                WHERE pc_name = ? AND status = 'extracted'
                 ORDER BY extracted_at DESC
             """, (pc_clean,)).fetchall()
         return [dict(r) for r in rows]
@@ -627,7 +627,7 @@ def get_latest_lotus_transfer_by_pc(pc_name: str) -> dict | None:
         with _get_conn() as conn:
             row = conn.execute("""
                 SELECT * FROM lotus_id_transfers
-                WHERE UPPER(pc_name) = ? AND status IN ('extracted', 'returned')
+                WHERE pc_name = ? AND status IN ('extracted', 'returned')
                 ORDER BY extracted_at DESC
                 LIMIT 1
             """, (pc_clean,)).fetchone()

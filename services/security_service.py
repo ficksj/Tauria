@@ -7,7 +7,6 @@ from typing import Dict, Any, List
 from config import settings
 from services.logger_service import log
 from services.ad_service import ad_service
-from services.db_service import log_audit_action, save_offboard_snapshot
 
 
 class SecurityService:
@@ -56,7 +55,7 @@ class SecurityService:
         }
 
         try:
-            # 0. Получаем текущие данные пользователя и сохраняем снапшот для возможного отката
+            # 0. Получаем текущие данные пользователя (снапшот сохранит ad_service.offboard_user)
             details = await asyncio.to_thread(ad_service.get_user_details, username)
             if not details:
                 raise RuntimeError(f"Пользователь '{username}' не найден в Active Directory")
@@ -64,14 +63,7 @@ class SecurityService:
             orig_dn = details.get("dn", "")
             user_groups = details.get("groups") or await ad_service.get_user_groups(username)
 
-            await save_offboard_snapshot(
-                username=username,
-                dn=orig_dn,
-                groups=list(user_groups),
-                offboarded_by=admin_id,
-            )
-
-            # 1. Отключаем учетную запись в AD (+ метка [TERMINATED] и перемещение в AD_DISABLED_USERS_OU)
+            # 1. Отключаем учетную запись в AD (+ метка [TERMINATED], снапшот и перемещение в AD_DISABLED_USERS_OU)
             offboard_res = await ad_service.offboard_user(username, offboarded_by=admin_id)
             disabled = bool(offboard_res.get("disabled")) or await ad_service.disable_user(username)
             results["account_disabled"] = disabled
@@ -110,23 +102,6 @@ class SecurityService:
             results["status"] = "SUCCESS" if (disabled and (not results["vpn_groups_failed"])) else "PARTIAL"
             results["success"] = results["status"] in ("SUCCESS", "PARTIAL")
 
-            details_str = (
-                f"Account disabled: {results['account_disabled']}; "
-                f"Password reset: {results['password_reset']}; "
-                f"Moved to Disabled OU: {results['moved']}; "
-                f"VPN groups removed: {results['vpn_groups_removed']}; "
-                f"VPN groups failed: {results['vpn_groups_failed']}; "
-                f"Duration: {duration:.2f}s"
-            )
-            await log_audit_action(
-                admin_id=admin_id,
-                admin_username="SuperAdmin",
-                action="EMERGENCY_KILL_SWITCH",
-                target=username,
-                status="EMERGENCY_ISOLATION",
-                details=details_str,
-            )
-
             log.info(f"Emergency kill switch completed for '{username}' in {duration:.2f}s. Status: {results['status']}")
             return results
 
@@ -139,14 +114,6 @@ class SecurityService:
             results["status"] = "ERROR"
             results["success"] = False
 
-            await log_audit_action(
-                admin_id=admin_id,
-                admin_username="SuperAdmin",
-                action="EMERGENCY_KILL_SWITCH",
-                target=username,
-                status="EMERGENCY_ISOLATION",
-                details=f"FAILED: {e}",
-            )
             log.error(f"Error during emergency kill switch for '{username}': {e}", exc_info=True)
             return results
 

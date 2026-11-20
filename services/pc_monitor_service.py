@@ -108,13 +108,9 @@ def _run_winrm_ps(target_pc: str, ps_script: str, timeout: int = 8) -> tuple[boo
 
 def _exec_remote_ps(target_pc: str, ps_script: str, timeout: int = 10) -> tuple[bool, str, str | None]:
     """
-    Универсальное выполнение PowerShell:
-    - На Linux: всегда через WinRM (pypsrp)
-    - На Windows: локальный PowerShell (если не задан отдельный PC_ADMIN_USER), либо fallback на WinRM
+    Универсальное выполнение PowerShell на удалённом ПК строго через WinRM (pypsrp).
+    Локальный запуск на сервере бота запрещён для предотвращения ошибочного выполнения команд на хосте бота.
     """
-    if _is_windows() and not settings.PC_ADMIN_USER and not os.getenv("PC_ADMIN_USER"):
-        out = run_ps_cmd(ps_script, timeout=timeout)
-        return bool(out), out, None if out else "error"
     return _run_winrm_ps(target_pc, ps_script, timeout=timeout)
 
 

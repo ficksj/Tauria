@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import ldap3
 from ldap3 import ALL, MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE, Connection, Server
 from ldap3.utils.conv import escape_filter_chars
+from ldap3.utils.dn import escape_rdn, parse_dn
 
 import config
 from config import settings
@@ -16,7 +17,7 @@ from services.logger_service import get_logger
 TZ_LOCAL = datetime.timezone(datetime.timedelta(hours=5))
 
 
-# --- ЧИСТАЯ РЕАЛИЗАЦИЯ MD4 ДЛЯ PYTHON 3.14+ ---
+# --- ЧИСТАЯ РЕАЛИЗАЦИЯ MD4 ДЛЯ PYTHON 3.14+ (RFC 1320) ---
 class PureMD4:
     def __init__(self, data=b''):
         self.buf = bytearray()
@@ -27,7 +28,7 @@ class PureMD4:
         self.buf.extend(data)
 
     def digest(self):
-        msg = self.buf
+        msg = bytearray(self.buf)
         orig_len_in_bits = (len(msg) * 8) & 0xffffffffffffffff
         msg.append(0x80)
         while len(msg) % 64 != 56:
@@ -40,41 +41,34 @@ class PureMD4:
         def G(x, y, z): return (x & y) | (x & z) | (y & z)
         def H(x, y, z): return x ^ y ^ z
 
-        def lrot(val, n): return ((val << n) & 0xffffffff) | (val >> (32 - n))
+        def lrot(val, n):
+            val &= 0xffffffff
+            return ((val << n) & 0xffffffff) | (val >> (32 - n))
 
         for i in range(0, len(msg), 64):
             X = list(struct.unpack('<16I', msg[i:i+64]))
             a, b, c, d = A, B, C, D
 
-            # Round 1
-            for s, k in zip([3, 7, 11, 19]*4, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]):
-                a = lrot((a + F(b, c, d) + X[k]) & 0xffffffff, s)
-            for s, k in zip([3, 7, 11, 19]*4, [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15]):
-                d = lrot((d + F(a, b, c) + X[k]) & 0xffffffff, s)
-            for s, k in zip([3, 7, 11, 19]*4, [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15]):
-                c = lrot((c + F(d, a, b) + X[k]) & 0xffffffff, s)
-            for s, k in zip([3, 7, 11, 19]*4, [0, 12, 1, 13, 2, 14, 3, 15, 4, 8, 5, 9, 6, 10, 7, 11]):
-                b = lrot((b + F(c, d, a) + X[k]) & 0xffffffff, s)
+            # Round 1 (16 operations)
+            for k in (0, 4, 8, 12):
+                a = lrot((a + F(b, c, d) + X[k]) & 0xffffffff, 3)
+                d = lrot((d + F(a, b, c) + X[k + 1]) & 0xffffffff, 7)
+                c = lrot((c + F(d, a, b) + X[k + 2]) & 0xffffffff, 11)
+                b = lrot((b + F(c, d, a) + X[k + 3]) & 0xffffffff, 19)
 
-            # Round 2
-            for s, k in zip([3, 5, 9, 13]*4, [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15]):
-                a = lrot((a + G(b, c, d) + X[k] + 0x5a827999) & 0xffffffff, s)
-            for s, k in zip([3, 5, 9, 13]*4, [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15]):
-                d = lrot((d + G(a, b, c) + X[k] + 0x5a827999) & 0xffffffff, s)
-            for s, k in zip([3, 5, 9, 13]*4, [0, 12, 1, 13, 2, 14, 3, 15, 4, 8, 5, 9, 6, 10, 7, 11]):
-                c = lrot((c + G(d, a, b) + X[k] + 0x5a827999) & 0xffffffff, s)
-            for s, k in zip([3, 5, 9, 13]*4, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]):
-                b = lrot((b + G(c, d, a) + X[k] + 0x5a827999) & 0xffffffff, s)
+            # Round 2 (16 operations)
+            for k in (0, 1, 2, 3):
+                a = lrot((a + G(b, c, d) + X[k] + 0x5a827999) & 0xffffffff, 3)
+                d = lrot((d + G(a, b, c) + X[k + 4] + 0x5a827999) & 0xffffffff, 5)
+                c = lrot((c + G(d, a, b) + X[k + 8] + 0x5a827999) & 0xffffffff, 9)
+                b = lrot((b + G(c, d, a) + X[k + 12] + 0x5a827999) & 0xffffffff, 13)
 
-            # Round 3
-            for s, k in zip([3, 9, 11, 15]*4, [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15]):
-                a = lrot((a + H(b, c, d) + X[k] + 0x6ed9eba1) & 0xffffffff, s)
-            for s, k in zip([3, 9, 11, 15]*4, [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15]):
-                d = lrot((d + H(a, b, c) + X[k] + 0x6ed9eba1) & 0xffffffff, s)
-            for s, k in zip([3, 9, 11, 15]*4, [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15]):
-                c = lrot((c + H(d, a, b) + X[k] + 0x6ed9eba1) & 0xffffffff, s)
-            for s, k in zip([3, 9, 11, 15]*4, [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15]):
-                b = lrot((b + H(c, d, a) + X[k] + 0x6ed9eba1) & 0xffffffff, s)
+            # Round 3 (16 operations)
+            for k in (0, 2, 1, 3):
+                a = lrot((a + H(b, c, d) + X[k] + 0x6ed9eba1) & 0xffffffff, 3)
+                d = lrot((d + H(a, b, c) + X[k + 8] + 0x6ed9eba1) & 0xffffffff, 9)
+                c = lrot((c + H(d, a, b) + X[k + 4] + 0x6ed9eba1) & 0xffffffff, 11)
+                b = lrot((b + H(c, d, a) + X[k + 12] + 0x6ed9eba1) & 0xffffffff, 15)
 
             A = (A + a) & 0xffffffff
             B = (B + b) & 0xffffffff
@@ -90,10 +84,10 @@ class PureMD4:
 _original_hash_new = hashlib.new
 
 
-def _patched_hash_new(name, string=b'', *args, **kwargs):
+def _patched_hash_new(name, data=b'', *args, **kwargs):
     if name.lower() == 'md4':
-        return PureMD4(string)
-    return _original_hash_new(name, string, *args, **kwargs)
+        return PureMD4(data)
+    return _original_hash_new(name, data, *args, **kwargs)
 
 
 hashlib.new = _patched_hash_new
@@ -133,10 +127,39 @@ def _fmt_local_dt(val, date_only: bool = False) -> str:
 
 
 def _extract_cn(dn: str) -> str:
+    try:
+        parts = parse_dn(str(dn))
+        for attr_type, attr_val, _ in parts:
+            if attr_type.upper() == "CN":
+                return attr_val
+    except Exception:
+        pass
     for part in str(dn).split(","):
         if part.upper().startswith("CN="):
             return part[3:]
     return str(dn)
+
+
+def _extract_rdn(dn: str) -> str:
+    try:
+        parts = parse_dn(str(dn), escape=True)
+        if parts:
+            attr_type, attr_val, _ = parts[0]
+            return f"{attr_type}={attr_val}"
+    except Exception:
+        pass
+    return str(dn).split(",")[0]
+
+
+def _extract_parent_dn(dn: str) -> str:
+    try:
+        parts = parse_dn(str(dn), escape=True)
+        if len(parts) > 1:
+            return ",".join(f"{t}={v}" for t, v, _ in parts[1:])
+        return ""
+    except Exception:
+        pass
+    return ",".join(str(dn).split(",")[1:]) if "," in str(dn) else ""
 
 
 def _attr_val(attrs: dict, key: str, default=None):
@@ -171,10 +194,9 @@ class TauriaADService:
         self.conn = None
         self._lock = threading.RLock()
         self._max_pwd_age_days: int | None = None
-        self.connect()
 
     def connect(self):
-        """Подключение к Active Directory (NTLM -> StartTLS + SIMPLE)."""
+        """Подключение к Active Directory (UPN -> StartTLS + SIMPLE, иначе NTLM -> StartTLS + SIMPLE)."""
         with self._lock:
             try:
                 if self.conn:
@@ -182,6 +204,7 @@ class TauriaADService:
                         self.conn.unbind()
                     except Exception:
                         pass
+                    self.conn = None
 
                 server_host = self.server_ip.replace("ldap://", "").replace("ldaps://", "")
                 tls_req = ldap3.Tls(validate=ssl.CERT_NONE)
@@ -191,7 +214,57 @@ class TauriaADService:
                     use_ssl=self.use_ssl,
                     tls=tls_req,
                     get_info=ldap3.ALL,
+                    connect_timeout=8,
                 )
+
+                def _connect_simple_tls() -> bool:
+                    username = self.user.split("\\")[-1] if "\\" in self.user else self.user
+                    bind_user = f"{username}@{self.domain}" if "@" not in username else username
+
+                    conn = ldap3.Connection(
+                        server,
+                        user=bind_user,
+                        password=self.password,
+                        authentication=ldap3.SIMPLE,
+                        auto_bind=False,
+                        receive_timeout=20,
+                    )
+
+                    if not self.use_ssl:
+                        try:
+                            if not conn.start_tls():
+                                log.error(f"StartTLS не удалось активировать: {conn.result}")
+                                try:
+                                    conn.unbind()
+                                except Exception:
+                                    pass
+                                return False
+                        except Exception as tls_err:
+                            log.error(f"Ошибка активации StartTLS: {tls_err}")
+                            try:
+                                conn.unbind()
+                            except Exception:
+                                pass
+                            return False
+
+                    if not conn.bind():
+                        log.error(f"StartTLS + SIMPLE bind отклонен: {conn.result}")
+                        try:
+                            conn.unbind()
+                        except Exception:
+                            pass
+                        return False
+
+                    self.conn = conn
+                    return True
+
+                # Если пользователь задан в формате UPN и не LDAPS — сразу StartTLS + SIMPLE (без ложных 4625 NTLM)
+                if "@" in self.user and not self.use_ssl:
+                    if not _connect_simple_tls():
+                        self.conn = None
+                        return
+                    log.info("Успешное подключение и авторизация в Active Directory (StartTLS + SIMPLE)")
+                    return
 
                 user_ntlm = self.user
                 if "@" in user_ntlm:
@@ -199,43 +272,39 @@ class TauriaADService:
                 elif "\\" not in user_ntlm:
                     user_ntlm = f"{self.domain.split('.')[0].upper()}\\{user_ntlm}"
 
-                # 1. Сначала пробуем обычный NTLM
-                self.conn = ldap3.Connection(
+                # 1. Пробуем NTLM
+                ntlm_conn = ldap3.Connection(
                     server,
                     user=user_ntlm,
                     password=self.password,
                     authentication=ldap3.NTLM,
                     auto_bind=False,
+                    receive_timeout=20,
                 )
 
-                if not self.conn.bind():
-                    log.warning(f"NTLM bind не прошел ({self.conn.result.get('description')}). Пробуем StartTLS + SIMPLE...")
+                if ntlm_conn.bind():
+                    self.conn = ntlm_conn
+                    log.info("Успешное подключение и авторизация в Active Directory (NTLM)")
+                    return
 
-                    username = self.user.split("\\")[-1] if "\\" in self.user else self.user
-                    bind_user = f"{username}@{self.domain}" if "@" not in username else username
+                log.warning(f"NTLM bind не прошел ({ntlm_conn.result.get('description')}). Пробуем StartTLS + SIMPLE...")
+                try:
+                    ntlm_conn.unbind()
+                except Exception:
+                    pass
 
-                    self.conn = ldap3.Connection(
-                        server,
-                        user=bind_user,
-                        password=self.password,
-                        authentication=ldap3.SIMPLE,
-                        auto_bind=False,
-                    )
+                if not _connect_simple_tls():
+                    self.conn = None
+                    return
 
-                    if not self.use_ssl:
-                        try:
-                            self.conn.start_tls()
-                        except Exception as tls_err:
-                            log.error(f"Ошибка активации StartTLS: {tls_err}")
-
-                    if not self.conn.bind():
-                        log.error(f"StartTLS + SIMPLE bind также отклонен: {self.conn.result}")
-                        self.conn = None
-                        return
-
-                log.info("Успешное подключение и авторизация в Active Directory")
+                log.info("Успешное подключение и авторизация в Active Directory (StartTLS + SIMPLE)")
             except Exception as e:
                 log.error(f"Ошибка подключения к AD: {e}")
+                if self.conn:
+                    try:
+                        self.conn.unbind()
+                    except Exception:
+                        pass
                 self.conn = None
 
     def ensure_connection(self):
@@ -437,7 +506,7 @@ class TauriaADService:
             'telephoneNumber', 'mobile', 'manager', 'company', 'whenCreated',
             'pwdLastSet', 'lastLogonTimestamp', 'badPwdCount', 'lockoutTime',
             'userAccountControl', 'distinguishedName', 'physicalDeliveryOfficeName',
-            'scriptPath', 'logonWorkstation', 'memberOf'
+            'scriptPath', 'logonWorkstation', 'memberOf', 'adminCount'
         ]
 
         with self._lock:
@@ -510,16 +579,23 @@ class TauriaADService:
                 "uac": uac,
                 "is_disabled": is_disabled,
                 "is_locked": is_locked,
+                "admin_count": int(entry.adminCount.value) if hasattr(entry, 'adminCount') and entry.adminCount and entry.adminCount.value is not None else 0,
                 "dn": str(entry.entry_dn),
             }
 
-    def reset_password(self, username: str, new_password: str, must_change: bool = True) -> bool:
+    def reset_password(self, username: str, new_password: str, must_change: bool = True, enforce_protected: bool = False) -> bool:
         """Сброс пароля пользователя в AD с опцией смены при следующем входе (pwdLastSet=0) и разблокировкой."""
         with self._lock:
             details = self.get_user_details(username)
             if not details:
                 log.error(f"Пользователь {username} не найден для сброса пароля.")
                 return False
+
+            if enforce_protected:
+                user_groups_lower = {g.lower() for g in (details.get("groups") or [])}
+                if details.get("admin_count") == 1 or (user_groups_lower & config.PROTECTED_AD_GROUPS):
+                    log.warning(f"Запрещен сброс пароля для защищенной УЗ {username} (adminCount={details.get('admin_count')})")
+                    return False
 
             user_dn = details["dn"]
             password_quoted = f'"{new_password}"'
@@ -626,7 +702,7 @@ class TauriaADService:
             if not self.conn:
                 return False
             try:
-                rdn = user_dn.split(',')[0]
+                rdn = _extract_rdn(user_dn)
                 res = self.conn.modify_dn(
                     dn=user_dn,
                     relative_dn=rdn,
@@ -650,7 +726,7 @@ class TauriaADService:
         details = self.get_user_details(username)
         if not details:
             return False, ""
-        original_ou = ",".join(details["dn"].split(",")[1:])
+        original_ou = _extract_parent_dn(details["dn"])
         success = self.move_user(details["dn"], target_ou)
         return success, original_ou
 
@@ -750,7 +826,7 @@ class TauriaADService:
             if not details:
                 return False
             try:
-                rdn = f"CN={pc_name}"
+                rdn = f"CN={escape_rdn(pc_name)}"
                 return bool(self.conn.modify_dn(dn=details["dn"], relative_dn=rdn, delete_old_dn=True, new_superior=target_ou_dn))
             except Exception as e:
                 log.error(f"Ошибка перемещения ПК: {e}")
@@ -929,13 +1005,7 @@ class TauriaADService:
                 if not self.conn.entries:
                     return []
                 member_of = self.conn.entries[0].memberOf.values if self.conn.entries[0].memberOf else []
-                groups = []
-                for dn in member_of:
-                    parts = str(dn).split(",")
-                    for p in parts:
-                        if p.upper().startswith("CN="):
-                            groups.append(p[3:])
-                            break
+                groups = [_extract_cn(str(dn)) for dn in member_of]
                 return sorted(groups)
 
         return await loop.run_in_executor(None, _get)
@@ -1037,27 +1107,25 @@ class TauriaADService:
                 entry = self.conn.entries[0]
                 user_dn = str(entry.entry_dn)
                 raw_groups = list(entry.memberOf.values) if hasattr(entry, "memberOf") and entry.memberOf else []
-                groups = []
-                for g_dn in raw_groups:
-                    first_rdn = str(g_dn).split(",")[0]
-                    if "=" in first_rdn:
-                        groups.append(first_rdn.split("=", 1)[1])
-                    else:
-                        groups.append(first_rdn)
+                groups = [_extract_cn(str(g_dn)) for g_dn in raw_groups]
 
                 uac = int(entry.userAccountControl.value or 512)
                 new_uac = uac | 2
 
-                self.conn.modify(user_dn, {'userAccountControl': [(MODIFY_REPLACE, [new_uac])]})
+                if not self.conn.modify(user_dn, {'userAccountControl': [(MODIFY_REPLACE, [new_uac])]}):
+                    err = self.conn.result.get("description", "error")
+                    log.error(f"Ошибка отключения УЗ {username} в offboard_user: {self.conn.result}")
+                    return {"success": False, "error": f"Не удалось отключить УЗ в AD: {err}"}
 
                 old_desc = str(entry.description or "")
                 new_desc = old_desc if "[TERMINATED]" in old_desc else f"[TERMINATED] {old_desc}".strip()
-                self.conn.modify(user_dn, {'description': [(MODIFY_REPLACE, [new_desc])]})
+                if not self.conn.modify(user_dn, {'description': [(MODIFY_REPLACE, [new_desc])]}):
+                    log.warning(f"Не удалось обновить description для {username} при offboard: {self.conn.result}")
 
                 moved = False
                 if self.disabled_ou and self.disabled_ou.lower() not in user_dn.lower():
                     try:
-                        rdn = user_dn.split(",")[0]
+                        rdn = _extract_rdn(user_dn)
                         if self.conn.modify_dn(user_dn, rdn, new_superior=self.disabled_ou):
                             moved = True
                     except Exception as ex:
@@ -1104,7 +1172,7 @@ class TauriaADService:
         snapshot = pending[0]
         snapshot_id = snapshot["id"]
         orig_dn = snapshot.get("dn", "")
-        orig_ou = ",".join(orig_dn.split(",")[1:]) if "," in orig_dn else ""
+        orig_ou = _extract_parent_dn(orig_dn)
         groups = snapshot.get("groups") or []
 
         loop = asyncio.get_running_loop()
@@ -1126,18 +1194,26 @@ class TauriaADService:
                 current_dn = str(entry.entry_dn)
                 uac = int(entry.userAccountControl.value or 514)
                 new_uac = uac & ~2  # Убираем ACCOUNTDISABLE (0x0002)
-                self.conn.modify(current_dn, {'userAccountControl': [(MODIFY_REPLACE, [new_uac])]})
+                if not self.conn.modify(current_dn, {'userAccountControl': [(MODIFY_REPLACE, [new_uac])]}):
+                    err = self.conn.result.get("description", "error")
+                    log.error(f"Ошибка включения УЗ {username} в rollback_offboard: {self.conn.result}")
+                    return {"success": False, "error": f"Не удалось включить УЗ в AD: {err}"}
 
                 old_desc = str(entry.description or "")
                 new_desc = old_desc.replace("[TERMINATED]", "").strip()
-                self.conn.modify(current_dn, {'description': [(MODIFY_REPLACE, [new_desc])]})
+                if new_desc:
+                    if not self.conn.modify(current_dn, {'description': [(MODIFY_REPLACE, [new_desc])]}):
+                        log.warning(f"Не удалось восстановить description для {username}: {self.conn.result}")
+                elif old_desc:
+                    if not self.conn.modify(current_dn, {'description': [(MODIFY_DELETE, [])]}):
+                        log.warning(f"Не удалось очистить description для {username}: {self.conn.result}")
 
                 moved = False
                 if orig_ou:
-                    current_parent = ",".join(current_dn.split(",")[1:])
+                    current_parent = _extract_parent_dn(current_dn)
                     if current_parent.lower() != orig_ou.lower():
                         try:
-                            rdn = current_dn.split(",")[0]
+                            rdn = _extract_rdn(current_dn)
                             if self.conn.modify_dn(current_dn, rdn, new_superior=orig_ou):
                                 moved = True
                         except Exception as ex:
@@ -1354,17 +1430,20 @@ class TauriaADService:
                 if not self.conn:
                     return {"success": False, "error": "Нет подключения к AD"}
 
-                # 1. Подбор свободного sAMAccountName
-                base_username = username.strip()
+                # 1. Подбор свободного sAMAccountName (лимит 20 симв., max 50 попыток)
+                base_username = username.strip()[:20]
                 actual_username = base_username
-                suffix = 2
-                while True:
+                found_free_sam = False
+                for attempt in range(50):
                     safe_u = escape_filter_chars(actual_username)
                     if self._safe_search(self.base_dn, f"(sAMAccountName={safe_u})", ["sAMAccountName"]) and self.conn.entries:
-                        actual_username = f"{base_username[:18]}{suffix}"
-                        suffix += 1
+                        suffix_str = str(attempt + 2)
+                        actual_username = f"{base_username[:20 - len(suffix_str)]}{suffix_str}"
                     else:
+                        found_free_sam = True
                         break
+                if not found_free_sam:
+                    return {"success": False, "error": f"Не удалось подобрать свободный логин для '{base_username}' за 50 попыток"}
 
                 # 2. Проверка существования целевого OU (с fallback)
                 target_ou = ou_dn
@@ -1383,7 +1462,21 @@ class TauriaADService:
                     except Exception:
                         continue
 
-                user_dn = f"CN={full_name},{target_ou}"
+                # 3. Подбор уникального CN в целевом OU (max 50 попыток)
+                base_cn = full_name.strip()
+                actual_cn = base_cn
+                found_free_cn = False
+                for attempt in range(50):
+                    safe_cn = escape_filter_chars(actual_cn)
+                    if self._safe_search(target_ou, f"(cn={safe_cn})", ["cn"]) and self.conn.entries:
+                        actual_cn = f"{base_cn} {attempt + 2}"
+                    else:
+                        found_free_cn = True
+                        break
+                if not found_free_cn:
+                    return {"success": False, "error": f"Не удалось подобрать уникальный CN для '{base_cn}' в {target_ou}"}
+
+                user_dn = f"CN={escape_rdn(actual_cn)},{target_ou}"
                 parts = full_name.strip().split()
                 if len(parts) >= 2:
                     sn = parts[0]
@@ -1423,7 +1516,12 @@ class TauriaADService:
                     return {"success": False, "error": f"Ошибка создания в AD: {self.conn.result}"}
 
                 if not self.reset_password(actual_username, password, must_change=True):
-                    return {"success": False, "error": "Пользователь создан, но не удалось установить пароль"}
+                    try:
+                        self.conn.delete(user_dn)
+                        log.warning(f"Удален осиротевший объект AD {user_dn} после ошибки установки пароля")
+                    except Exception as del_err:
+                        log.error(f"Не удалось удалить осиротевший объект AD {user_dn}: {del_err}")
+                    return {"success": False, "error": "Не удалось установить пароль (созданная УЗ откачена)"}
 
                 enabled = self.conn.modify(user_dn, {"userAccountControl": [(MODIFY_REPLACE, [512])]})
                 if not enabled:

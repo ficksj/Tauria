@@ -8,5 +8,7 @@ colorlog>=6.9.0
 pywinrm>=0.5.0
 PyYAML>=6.0.0
 smbprotocol>=1.14.0
+reportlab>=4.0.0
+pypsrp>=0.8.1
 pytest>=8.0.0
 pytest-asyncio>=0.24.0

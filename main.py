@@ -115,6 +115,10 @@ async def main():
         briefing_task.cancel()
         health_task.cancel()
         backup_task.cancel()
+        await asyncio.gather(
+            jit_task, briefing_task, health_task, backup_task,
+            return_exceptions=True,
+        )
         await bot.session.close()
         log.info("Tauria Bot shut down cleanly.")
 

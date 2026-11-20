@@ -1,54 +1,127 @@
+import asyncio
 from html import escape
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import InputRichMessage, Message
+from services.logger_service import log
+
+MAX_RICH_HTML_BYTES = 32768
+_EDIT_FALLBACK_ERRORS = (
+    "message can't be edited",
+    "message to edit not found",
+    "there is no text in the message to edit",
+)
+
 
 def html_text(value) -> str:
     """Escape dynamic values for Telegram Rich HTML."""
     return escape(str(value if value is not None and value != "" else "—"), quote=True)
 
+
+def _clamp_rich_html(html: str) -> str:
+    """Контролирует максимальную длину Rich HTML, чтобы избежать падения API."""
+    if not html:
+        return ""
+    encoded = html.encode("utf-8")
+    if len(encoded) <= MAX_RICH_HTML_BYTES:
+        return html
+    log.warning(
+        f"Rich HTML payload exceeds {MAX_RICH_HTML_BYTES} bytes ({len(encoded)} bytes); truncating."
+    )
+    # Сохраняем блок кнопок в конце, если он есть
+    btn_idx = html.find("<tg-button-row")
+    if btn_idx != -1:
+        buttons_part = html[btn_idx:]
+        body_part = html[:btn_idx]
+        budget = max(512, MAX_RICH_HTML_BYTES - len(buttons_part.encode("utf-8")) - 128)
+        trimmed_body = body_part.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+        return f"{trimmed_body}<p><small>… (вывод сокращён из-за лимита Telegram)</small></p>{buttons_part}"
+    trimmed = encoded[: MAX_RICH_HTML_BYTES - 128].decode("utf-8", errors="ignore")
+    return f"{trimmed}<p><small>… (вывод сокращён из-за лимита Telegram)</small></p>"
+
+
 def rich_message(html: str) -> InputRichMessage:
     """Create native Bot API rich-message payload."""
-    return InputRichMessage(html=html, skip_entity_detection=True)
+    return InputRichMessage(html=_clamp_rich_html(html), skip_entity_detection=True)
+
 
 async def send_rich(message: Message, html: str) -> Message:
     """Send native Rich Message to current chat."""
-    return await message.bot.send_rich_message(
-        chat_id=message.chat.id,
-        rich_message=rich_message(html),
-        message_thread_id=getattr(message, "message_thread_id", None),
-    )
+    try:
+        return await message.bot.send_rich_message(
+            chat_id=message.chat.id,
+            rich_message=rich_message(html),
+            message_thread_id=getattr(message, "message_thread_id", None),
+        )
+    except TelegramRetryAfter as error:
+        await asyncio.sleep(error.retry_after + 0.5)
+        return await message.bot.send_rich_message(
+            chat_id=message.chat.id,
+            rich_message=rich_message(html),
+            message_thread_id=getattr(message, "message_thread_id", None),
+        )
+
 
 async def edit_rich(message: Message, html: str):
     """Replace content of message with new Rich Message."""
-    try:
-        return await message.edit_text(rich_message=rich_message(html), parse_mode=None)
-    except TelegramBadRequest as error:
-        if "message can't be edited" not in str(error).lower():
+    for attempt in range(2):
+        try:
+            return await message.edit_text(rich_message=rich_message(html), parse_mode=None)
+        except TelegramRetryAfter as error:
+            if attempt == 0:
+                await asyncio.sleep(error.retry_after + 0.5)
+                continue
             raise
-        return await send_rich(message, html)
+        except TelegramBadRequest as error:
+            err_msg = str(error).lower()
+            if "message is not modified" in err_msg:
+                return message
+            if any(marker in err_msg for marker in _EDIT_FALLBACK_ERRORS):
+                return await send_rich(message, html)
+            raise
+
 
 async def edit_rich_by_ids(bot, chat_id: int | str, message_id: int, html: str):
     """Edit a Rich Message when only its stored chat/message IDs are available."""
-    try:
-        return await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            rich_message=rich_message(html),
-            parse_mode=None,
-        )
-    except TelegramBadRequest as error:
-        if "message can't be edited" not in str(error).lower():
+    for attempt in range(2):
+        try:
+            return await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                rich_message=rich_message(html),
+                parse_mode=None,
+            )
+        except TelegramRetryAfter as error:
+            if attempt == 0:
+                await asyncio.sleep(error.retry_after + 0.5)
+                continue
             raise
-        return await send_rich_to_chat(bot, chat_id, html)
+        except TelegramBadRequest as error:
+            err_msg = str(error).lower()
+            if "message is not modified" in err_msg:
+                return None
+            if any(marker in err_msg for marker in _EDIT_FALLBACK_ERRORS):
+                return await send_rich_to_chat(bot, chat_id, html)
+            raise
+
 
 async def send_rich_to_chat(bot, chat_id: int | str, html: str):
     """Send native Rich Message directly to chat/channel."""
-    return await bot.send_rich_message(chat_id=chat_id, rich_message=rich_message(html))
+    try:
+        return await bot.send_rich_message(chat_id=chat_id, rich_message=rich_message(html))
+    except TelegramRetryAfter as error:
+        await asyncio.sleep(error.retry_after + 0.5)
+        return await bot.send_rich_message(chat_id=chat_id, rich_message=rich_message(html))
+
 
 def callback_button(label: str, data: str, style: str = "primary") -> str:
     """Build callback button with escaped label and payload."""
-    if not data or len(data.encode("utf-8")) > 64:
-        raise ValueError("Telegram callback_data must be 1-64 UTF-8 bytes")
+    if not data:
+        log.warning(f"Empty callback_data for button '{label}', replacing with 'noop'")
+        data = "noop"
+    encoded = data.encode("utf-8")
+    if len(encoded) > 64:
+        log.warning(f"Telegram callback_data exceeds 64 bytes ({len(encoded)}B): {data!r} — truncating")
+        data = encoded[:64].decode("utf-8", errors="ignore")
     return (
         f'<tg-button type="callback_data" style="{style}" '
         f'data="{html_text(data)}">{html_text(label)}</tg-button>'

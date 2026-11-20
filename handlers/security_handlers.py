@@ -1,6 +1,9 @@
+import re
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
+
+_RE_SAM_ACCOUNT = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 from services.ad_service import ad_service
 from services.security_service import emergency_kill_switch
@@ -44,9 +47,12 @@ async def cb_killswitch_start(call: CallbackQuery, state: FSMContext):
     await edit_rich(call.message, card)
     await call.answer()
 
-@security_router.message(KillSwitchState.waiting_for_username)
+@security_router.message(KillSwitchState.waiting_for_username, F.text)
 async def process_killswitch_username(message: Message, state: FSMContext):
-    username = message.text.strip()
+    username = (message.text or "").strip()
+    if not _RE_SAM_ACCOUNT.fullmatch(username):
+        await message.answer("❌ Некорректный логин. Используйте только латиницу, цифры и символы . _ - (до 64 симв.).")
+        return
     await state.update_data(killswitch_target=username)
     await state.set_state(KillSwitchState.waiting_for_confirmation)
 
@@ -173,10 +179,11 @@ async def cb_jit_active(call: CallbackQuery):
     else:
         body = [f"📋 <b>Активные JIT-гранты ({len(grants)}):</b>", ""]
         for g in grants:
-            gid = g["id"]
-            uname = g["username"]
-            grp = g["group_name"]
-            exp = g.get("expires_at", "N/A")
+            g_dict = dict(g)
+            gid = g_dict["id"]
+            uname = g_dict["username"]
+            grp = g_dict["group_name"]
+            exp = g_dict.get("expires_at", "N/A")
             body.append(f"• #{gid} <code>{html_text(uname)}</code> → <b>{html_text(grp)}</b> (до {html_text(str(exp))})")
             buttons.append(button_row(
                 callback_button(f"🚫 Отозвать #{gid} ({uname})", f"jit:revoke:{gid}", "danger")
@@ -194,7 +201,11 @@ async def cb_jit_active(call: CallbackQuery):
 async def cb_jit_revoke(call: CallbackQuery):
     grant_id = int(call.data.split(":")[2])
     await call.answer(f"🚫 Отзываю грант #{grant_id}...", show_alert=False)
-    res = await jit_service.revoke_grant_now(grant_id)
+    res = await jit_service.revoke_grant_now(
+        grant_id,
+        admin_id=call.from_user.id,
+        admin_username=call.from_user.username,
+    )
     if res.get("success"):
         body = [
             f"✅ <b>JIT-грант #{grant_id} досрочно отозван!</b>",
@@ -220,6 +231,9 @@ async def cb_jit_revoke(call: CallbackQuery):
 @security_router.callback_query(F.data.startswith("jit:grp:"))
 async def cb_jit_select_group(call: CallbackQuery, state: FSMContext):
     group = call.data.split(":")[2]
+    if group not in JIT_GROUPS:
+        await call.answer("⛔️ Недопустимая JIT-группа.", show_alert=True)
+        return
     await state.update_data(jit_group=group)
     await state.set_state(JITPrivilegeState.waiting_for_username)
 
@@ -238,9 +252,12 @@ async def cb_jit_select_group(call: CallbackQuery, state: FSMContext):
     await edit_rich(call.message, card)
     await call.answer()
 
-@security_router.message(JITPrivilegeState.waiting_for_username)
+@security_router.message(JITPrivilegeState.waiting_for_username, F.text)
 async def process_jit_username(message: Message, state: FSMContext):
-    username = message.text.strip()
+    username = (message.text or "").strip()
+    if not _RE_SAM_ACCOUNT.fullmatch(username):
+        await message.answer("❌ Некорректный логин. Используйте только латиницу, цифры и символы . _ - (до 64 симв.).")
+        return
     data = await state.get_data()
     group = data.get("jit_group", "Domain Admins")
     await state.update_data(jit_username=username)
@@ -275,16 +292,31 @@ async def process_jit_username(message: Message, state: FSMContext):
 @security_router.callback_query(F.data.startswith("jit:dur:"))
 async def cb_jit_grant(call: CallbackQuery, state: FSMContext):
     parts = call.data.split(":")
+    if len(parts) < 5:
+        await call.answer("❌ Некорректные параметры JIT.", show_alert=True)
+        return
     group = parts[2]
     username = parts[3]
     dur_code = parts[4]
+    if group not in JIT_GROUPS:
+        await call.answer("⛔️ Недопустимая JIT-группа.", show_alert=True)
+        return
+    if not _RE_SAM_ACCOUNT.fullmatch(username):
+        await call.answer("❌ Некорректный логин пользователя.", show_alert=True)
+        return
     await state.clear()
 
     dur_label, dur_sec = JIT_DURATIONS.get(dur_code, ("1 час", 3600))
     duration_min = max(1, dur_sec // 60)
     await call.answer(f"⏳ Назначаю права на {dur_label}...", show_alert=False)
 
-    res = await jit_service.grant_temporary_access(username, group, duration_min, call.from_user.id)
+    res = await jit_service.grant_temporary_access(
+        username,
+        group,
+        duration_min,
+        call.from_user.id,
+        admin_username=call.from_user.username,
+    )
     ok = res.get("success", False) if isinstance(res, dict) else bool(res)
 
     if ok:
@@ -313,7 +345,7 @@ async def cb_jit_grant(call: CallbackQuery, state: FSMContext):
     ]
     card = render_bubble_card(
         title="⏳ Результат выдачи JIT-прав",
-        badge="JIT Granted" if res else "Failed",
+        badge="JIT Granted" if ok else "Failed",
         body_lines=body,
         buttons=buttons
     )

@@ -27,7 +27,8 @@ from handlers.states import (
 ad_admin_router = Router()
 
 @ad_admin_router.callback_query(F.data == "menu:ad")
-async def cb_ad_menu(call: CallbackQuery):
+async def cb_ad_menu(call: CallbackQuery, state: FSMContext):
+    await state.clear()
     body = [
         "Управление безопасностью учетных записей Active Directory DS.",
         "Выберите действие:"
@@ -204,9 +205,9 @@ def _translit_ru_to_en(text: str) -> str:
 def _generate_ad_username(full_name: str) -> str:
     parts = [p for p in full_name.strip().split() if p]
     if len(parts) >= 2:
-        # Поддержка формата "Фамилия Имя ..." или "Имя Фамилия"
-        first_initial = _translit_ru_to_en(parts[0][0])
-        last_name = _translit_ru_to_en(parts[1])
+        # Стандартный формат ФИО: "Фамилия Имя [Отчество]" -> i.familiya (например, Сериков Айбек -> a.serikov)
+        first_initial = _translit_ru_to_en(parts[1][0])
+        last_name = _translit_ru_to_en(parts[0])
         raw = f"{first_initial}.{last_name}"
     elif parts:
         raw = _translit_ru_to_en(parts[0])
@@ -215,8 +216,19 @@ def _generate_ad_username(full_name: str) -> str:
     return "".join(c for c in raw if c.isalnum() or c in "._-")[:20]
 
 def _generate_temp_password(length: int = 12) -> str:
-    alphabet = string.ascii_letters + string.digits + "!@#$%"
-    return "".join(secrets.choice(alphabet) for _ in range(length))
+    length = max(length, 8)
+    specials = "!@#$%"
+    required = [
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.digits),
+        secrets.choice(specials),
+    ]
+    alphabet = string.ascii_letters + string.digits + specials
+    rest = [secrets.choice(alphabet) for _ in range(length - len(required))]
+    chars = required + rest
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
 
 
 def parse_sz_text(raw_text: str) -> dict:
@@ -267,7 +279,7 @@ def parse_sz_text(raw_text: str) -> dict:
                 if not curator:
                     curator = v
                 continue
-            if any(w in k for w in ("период", "срок", "дата выхода", "выход", "действ", "до")):
+            if any(w in k for w in ("период", "срок", "дата выхода", "выход", "действ")):
                 if not period:
                     period = v
                 continue
@@ -357,7 +369,7 @@ def format_helpdesk_onboarding_report(
 
 
 DEPARTMENT_TEMPLATES = {
-    "it": {"department": "ДapиТ (IT)", "title": "Специалист IT", "groups": ["IT", "VPN-Users"]},
+    "it": {"department": "ДАРиТ (IT)", "title": "Специалист IT", "groups": ["IT", "VPN-Users"]},
     "acc": {"department": "Бухгалтерия", "title": "Бухгалтер", "groups": ["Accounting", "1C-Users"]},
     "back": {"department": "Бэк-офис", "title": "Менеджер", "groups": ["BackOffice"]},
     "cred": {"department": "Кредитование", "title": "Кредитный аналитик", "groups": ["CreditDept"]},
@@ -830,7 +842,7 @@ async def cb_create_user_template(call: CallbackQuery, state: FSMContext):
         await call.answer("Неизвестный шаблон", show_alert=True)
         return
 
-    is_intern = bool(data.get("is_intern", tpl_key == "intern"))
+    is_intern = bool(data.get("is_intern")) or (tpl_key == "intern")
     title = "Стажер" if is_intern else tpl.get("title", data.get("title", "Специалист"))
     sz_info = data.get("sz_info", "По СЗ")
     curator = data.get("curator", "—")
@@ -912,7 +924,15 @@ async def cb_ad_rollback(call: CallbackQuery, state: FSMContext):
 
 @ad_admin_router.message(RollbackOffboardState.waiting_for_username)
 async def process_ad_rollback(message: Message, state: FSMContext):
-    username = message.text.strip()
+    username = (message.text or "").strip()
+    if not username:
+        await send_rich(message, render_bubble_card(
+            title="⚠️ Пустой ввод",
+            badge="AD Recovery",
+            body_lines=["Введите текстовый логин сотрудника."],
+            buttons=[button_row(callback_button("⬅️ Назад в AD", "menu:ad", "link"))],
+        ))
+        return
     await state.clear()
 
     res = await ad_service.rollback_offboard(username)
@@ -939,8 +959,7 @@ async def process_ad_rollback(message: Message, state: FSMContext):
     )
     await send_rich(message, card)
 
-@ad_admin_router.callback_query(F.data == "ad:locked")
-async def cb_ad_locked(call: CallbackQuery):
+async def _render_ad_locked(call: CallbackQuery):
     users = await ad_service.get_locked_users()
     if not users:
         body = ["🟢 <b>В данный момент нет заблокированных учетных записей!</b>"]
@@ -952,14 +971,13 @@ async def cb_ad_locked(call: CallbackQuery):
             buttons=buttons
         )
         await edit_rich(call.message, card)
-        await call.answer()
         return
 
     body = [f"Найдено заблокированных: <b>{len(users)}</b>"]
     table = []
     buttons = []
     for u in users[:8]:
-        table.append((u["username"], f"{u['name']} ({u['department']})"))
+        table.append((u["username"], f"{html_text(u.get('name'))} ({html_text(u.get('department'))})"))
         buttons.append(button_row(callback_button(f"🔓 Разблокировать {u['username']}", f"ad:unlock:{u['username']}", "success")))
 
     buttons.append(button_row(callback_button("⬅️ Назад в AD", "menu:ad", "link")))
@@ -971,7 +989,13 @@ async def cb_ad_locked(call: CallbackQuery):
         buttons=buttons
     )
     await edit_rich(call.message, card)
+
+
+@ad_admin_router.callback_query(F.data == "ad:locked")
+async def cb_ad_locked(call: CallbackQuery):
+    await _render_ad_locked(call)
     await call.answer()
+
 
 @ad_admin_router.callback_query(F.data.startswith("ad:unlock:"))
 async def cb_ad_unlock(call: CallbackQuery):
@@ -989,7 +1013,7 @@ async def cb_ad_unlock(call: CallbackQuery):
         await call.answer(f"✅ Пользователь {username} успешно разблокирован!", show_alert=True)
     else:
         await call.answer(f"❌ Ошибка при разблокировке {username}", show_alert=True)
-    await cb_ad_locked(call)
+    await _render_ad_locked(call)
 
 # Offboarding
 @ad_admin_router.callback_query(F.data == "ad:offboard")
@@ -1015,7 +1039,15 @@ async def cb_ad_offboard_prompt(call: CallbackQuery, state: FSMContext):
 
 @ad_admin_router.message(ADActionState.waiting_for_offboard_username)
 async def process_offboard_username(message: Message, state: FSMContext):
-    username = message.text.strip()
+    username = (message.text or "").strip()
+    if not username:
+        await send_rich(message, render_bubble_card(
+            title="⚠️ Пустой ввод",
+            badge="Offboarding",
+            body_lines=["Введите текстовый логин сотрудника."],
+            buttons=[button_row(callback_button("❌ Отмена", "menu:ad", "link"))],
+        ))
+        return
     body = [
         f"Вы действительно хотите <b>УВОЛИТЬ</b> сотрудника <code>{html_text(username)}</code>?",
         "Действие заблокирует аккаунт в AD и переместит его в архив!"

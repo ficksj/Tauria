@@ -444,6 +444,7 @@ async def handle_user_action(callback: CallbackQuery, state: FSMContext):
         return
 
     if action == "show":
+        await state.clear()
         await callback.answer()
         await show_user_profile(callback.message, username, edit=True)
         return
@@ -918,6 +919,7 @@ async def handle_user_groups(callback: CallbackQuery, state: FSMContext):
     arg = parts[2] if len(parts) > 2 else ""
 
     if sub == "view":
+        await state.clear()
         await callback.answer()
         await _render_user_groups_panel(callback, arg, state, page=0)
         return
@@ -986,7 +988,9 @@ async def handle_user_groups(callback: CallbackQuery, state: FSMContext):
             await callback.answer("⚠️ Список групп устарел", show_alert=True)
             return
         g = groups[idx]
-        ok, msg = await asyncio.to_thread(ad_service.remove_user_from_group, username, g["dn"])
+        ok, msg = await asyncio.to_thread(
+            ad_service.remove_user_from_group_sync, username, g["dn"], True
+        )
         await send_audit_log(callback.bot, callback.from_user, f"Удаление из группы ({g['name']})", username, status=ok)
         await callback.answer(f"✅ Удален из {g['name']}" if ok else f"❌ {msg}", show_alert=not ok)
         await _render_user_groups_panel(callback, username, state, page=0)
@@ -1001,7 +1005,9 @@ async def handle_user_groups(callback: CallbackQuery, state: FSMContext):
             await callback.answer("⚠️ Результаты поиска устарели", show_alert=True)
             return
         g = search_groups[idx]
-        ok, msg = await asyncio.to_thread(ad_service.add_user_to_group, username, g["dn"])
+        ok, msg = await asyncio.to_thread(
+            ad_service.add_user_to_group_sync, username, g["dn"], True
+        )
         await send_audit_log(callback.bot, callback.from_user, f"Добавление в группу ({g['name']})", username, status=ok)
         await callback.answer(f"✅ Добавлен в {g['name']}" if ok else f"❌ {msg}", show_alert=not ok)
         await _render_user_groups_panel(callback, username, state, page=0)

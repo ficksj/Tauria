@@ -4,7 +4,41 @@ import subprocess
 import time
 from typing import Dict, Any, List
 from config import settings
-from services.winrm_service import run_ps as winrm_run_ps
+
+try:
+    from pypsrp.client import Client as WinRMClient
+except ImportError:
+    WinRMClient = None
+
+
+def _run_winrm_ps_sync(host: str, script: str, timeout: int = 15) -> Dict[str, Any]:
+    if WinRMClient is None:
+        return {"success": False, "stdout": "", "stderr": "Пакет pypsrp не установлен на сервере."}
+    user = (settings.AD_USER or settings.pc_admin_user or "").strip()
+    password = settings.AD_PASSWORD or settings.pc_admin_password or ""
+    if not user or not password:
+        return {"success": False, "stdout": "", "stderr": "Учетные данные AD_USER / AD_PASSWORD не заданы в .env"}
+    try:
+        client = WinRMClient(
+            host,
+            username=user,
+            password=password,
+            ssl=False,
+            auth="negotiate",
+            encryption="auto",
+            connection_timeout=6,
+            read_timeout=timeout,
+        )
+        stdout, streams, had_errors = client.execute_ps(script)
+        err_msgs = [str(e) for e in (streams.error or [])] if streams and hasattr(streams, "error") else []
+        stderr = "\n".join(err_msgs).strip()
+        return {
+            "success": not had_errors,
+            "stdout": (stdout or "").strip(),
+            "stderr": stderr,
+        }
+    except Exception as e:
+        return {"success": False, "stdout": "", "stderr": str(e)}
 
 PLAYBOOKS: Dict[str, Dict[str, Any]] = {
     "disk_usage": {
@@ -115,7 +149,7 @@ async def execute_playbook(playbook_id: str) -> Dict[str, Any]:
 
     if info.get("winrm"):
         start_time = time.perf_counter()
-        res = await winrm_run_ps(settings.AD_SERVER, info["command_win"], timeout=15)
+        res = await asyncio.to_thread(_run_winrm_ps_sync, settings.AD_SERVER, info["command_win"], 15)
         duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
         success = res.get("success", False)
         output = res.get("stdout", "")

@@ -92,18 +92,19 @@ def render_pc_profile(
             callback_button(lotus_btn_text, f"lotus:pc:{name}", "primary"),
         ),
         button_row(
-            callback_button("⚠️ События (24ч)", f"pc:events:{name}", "secondary"),
             callback_button("📦 В notebooklenovo", f"pc:move:{name}", "primary"),
+            callback_button("🖥 В KDB Computers", f"pc:move_comp:{name}", "primary"),
         ),
         button_row(
+            callback_button("⚠️ События (24ч)", f"pc:events:{name}", "secondary"),
             callback_button("🔐 LAPS Пароль", f"pc:laps:{name}", "primary"),
+        ),
+        button_row(
             callback_button("🔄 gpupdate /force", f"pc:gpupdate:{name}", "primary"),
-        ),
-        button_row(
             callback_button("🚪 Logoff сеанса", f"pc:logoff_ask:{name}", "danger"),
-            callback_button("🔄 Перезагрузить", f"pc:reboot_confirm:{name}", "danger"),
         ),
         button_row(
+            callback_button("🔄 Перезагрузить", f"pc:reboot_confirm:{name}", "danger"),
             callback_button("🗑 Удалить из AD", f"pc:delete_confirm:{name}", "danger"),
         ),
         button_row(
@@ -186,7 +187,7 @@ def _render_pc_search_page(computers: list[dict], page: int = 0) -> str:
     page = max(0, min(page, total_pages - 1))
     chunk = computers[page * PC_SEARCH_PAGE_SIZE : (page + 1) * PC_SEARCH_PAGE_SIZE]
 
-    table_rows = [(f"<code>{html_text(pc['Name'])}</code>", html_text(pc["Description"])) for pc in chunk]
+    table_rows = [(pc["Name"], html_text(pc["Description"])) for pc in chunk]
     buttons = [
         button_row(callback_button(f"💻 {pc['Name']}"[:46], f"pc:show:{pc['Name']}"))
         for pc in chunk
@@ -351,7 +352,7 @@ async def handle_pc_action(callback: CallbackQuery, state: FSMContext):
             free = disk.get("free_gb", 0)
             total = disk.get("total_gb", 0)
             bar = render_progress_bar(pct, length=8)
-            table_rows.append((f"Диск {html_text(dev)}", f"{bar}<br>{free} ГБ свободно из {total} ГБ"))
+            table_rows.append((f"Диск {dev}", f"{bar}<br>{free} ГБ свободно из {total} ГБ"))
 
         card = render_bubble_card(
             title="📊 Системная диагностика ПК",

@@ -56,6 +56,19 @@ def validate_unc_path(path: str) -> str:
         raise DriveMapValidationError(f"Некорректный UNC-путь: {path!r}")
     if ".." in cleaned.split("\\"):
         raise DriveMapValidationError("Сегмент '..' в UNC-пути запрещен")
+    try:
+        from drivemap.config import settings as dm_settings
+        allowed_hosts = [h.strip().lower() for h in (getattr(dm_settings, "file_server_list", None) or []) if h.strip()]
+        if allowed_hosts:
+            host = cleaned.lstrip("\\").split("\\", 1)[0].lower()
+            if host not in allowed_hosts:
+                raise DriveMapValidationError(
+                    f"Хост '{host}' не входит в список разрешённых файловых серверов."
+                )
+    except DriveMapValidationError:
+        raise
+    except Exception:
+        pass
     return cleaned
 
 
@@ -634,7 +647,11 @@ class DriveMapEngine:
     ) -> MutationResult:
         """Restore Drives.xml from a recorded transaction backup directory."""
         tx_id = uuid.uuid4().hex[:10]
-        bdir = Path(record.backup_path)
+        bdir = Path(record.backup_path).resolve()
+        try:
+            bdir.relative_to(self.backup_dir.resolve())
+        except ValueError:
+            raise ValueError(f"Недопустимый путь бэкапа вне backup_dir: {record.backup_path}")
         if not bdir.exists() or not (bdir / "Drives.xml").exists():
             raise FileNotFoundError(f"Каталог бэкапа не найден: {bdir}")
 
@@ -877,5 +894,5 @@ class DriveMapEngine:
             gpo_version_before=base_ver,
             gpo_version_after=new_ver,
             backup_dir=str(tx_backup),
-            message="Успешно применено в USR-CFG-DriveMaps-PerUser-U.",
+            message=f"Успешно применено в {self.target_gpo_name}.",
         )

@@ -51,8 +51,7 @@ from handlers.states import NetCheckState
 infra_router = Router()
 
 
-@infra_router.callback_query(F.data == "menu:infra")
-async def cb_infra_menu(call: CallbackQuery):
+async def _render_infra_menu(call: CallbackQuery):
     metrics = await get_system_metrics()
     ram = metrics["ram"]
     disk = metrics["disk"]
@@ -105,6 +104,11 @@ async def cb_infra_menu(call: CallbackQuery):
         buttons=buttons,
     )
     await edit_rich(call.message, card)
+
+
+@infra_router.callback_query(F.data == "menu:infra")
+async def cb_infra_menu(call: CallbackQuery):
+    await _render_infra_menu(call)
     await call.answer()
 
 
@@ -419,7 +423,7 @@ async def cb_restart_service(call: CallbackQuery):
         await call.answer(f"✅ Служба {service} успешно перезапущена!", show_alert=True)
     else:
         await call.answer(f"❌ Ошибка перезапуска {service}", show_alert=True)
-    await cb_infra_menu(call)
+    await _render_infra_menu(call)
 
 
 # Меню выбора логов сервиса
@@ -485,7 +489,8 @@ async def cb_view_service_logs(call: CallbackQuery):
 # 3. Сеть и Порты (с замером RTT ms)
 # ==========================================
 @infra_router.callback_query(F.data == "menu:net")
-async def cb_net_menu(call: CallbackQuery):
+async def cb_net_menu(call: CallbackQuery, state: FSMContext):
+    await state.clear()
     exch_host = settings.EXCHANGE_SERVER or "192.168.254.23"
     targets = [
         ("Active Directory (LDAP)", settings.AD_SERVER or "192.168.201.15", 389),
@@ -699,11 +704,7 @@ async def process_net_custom_target(message: Message, state: FSMContext):
     await send_rich(message, card)
 
 
-@infra_router.callback_query(F.data.startswith("exchange:menu:"))
-async def cb_exchange_user_menu(call: CallbackQuery):
-    username = call.data.split(":", 2)[2].strip()
-    await call.answer(f"📧 Загружаю данные ящика {username}...", show_alert=False)
-
+async def _render_exchange_user_menu(call: CallbackQuery, username: str):
     res = await get_mailbox_details(username)
     if not res.get("ok"):
         card = render_bubble_card(
@@ -771,6 +772,14 @@ async def cb_exchange_user_menu(call: CallbackQuery):
     await edit_rich(call.message, card)
 
 
+@infra_router.callback_query(F.data.startswith("exchange:menu:"))
+async def cb_exchange_user_menu(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    username = call.data.split(":", 2)[2].strip()
+    await call.answer(f"📧 Загружаю данные ящика {username}...", show_alert=False)
+    await _render_exchange_user_menu(call, username)
+
+
 @infra_router.callback_query(F.data.startswith("exchange:gal_show:") | F.data.startswith("exchange:gal_hide:"))
 async def cb_exchange_gal_toggle(call: CallbackQuery):
     action_key, _, username = call.data.partition(":")[2].partition(":")
@@ -796,7 +805,7 @@ async def cb_exchange_gal_toggle(call: CallbackQuery):
         await edit_rich(call.message, card)
         return
 
-    await cb_exchange_user_menu(call)
+    await _render_exchange_user_menu(call, username)
 
 
 @infra_router.callback_query(F.data.startswith("exchange:delegate:"))
@@ -927,7 +936,7 @@ async def cb_exchange_forward_off(call: CallbackQuery, state: FSMContext):
         await edit_rich(call.message, card)
         return
 
-    await cb_exchange_user_menu(call)
+    await _render_exchange_user_menu(call, username)
 
 
 @infra_router.callback_query(F.data.startswith("exchange:mbx_user:"))

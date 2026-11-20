@@ -656,7 +656,11 @@ class ShareAccessEngine:
         """Restore ACL / AD group state from a recorded access transaction backup directory."""
         if not record.backup_path:
             raise AccessOperationError("Для этой транзакции нет сохранённого бэкапа.")
-        bdir = Path(record.backup_path)
+        bdir = Path(record.backup_path).resolve()
+        try:
+            bdir.relative_to(self.backup_dir.resolve())
+        except ValueError:
+            raise AccessOperationError(f"Недопустимый путь бэкапа вне backup_dir: {record.backup_path}")
         if not bdir.exists():
             raise AccessOperationError(f"Каталог бэкапа не найден: {bdir}")
 

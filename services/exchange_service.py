@@ -1,8 +1,12 @@
 import asyncio
+import base64
 import json
-import platform
-import subprocess
+import re
 from typing import Any, Dict
+
+_RE_IDENTITY = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_RE_EMAIL = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$")
+_RE_DATABASE = re.compile(r"^[A-Za-z0-9._ -]{1,64}$")
 
 try:
     from pypsrp.client import Client as WinRMClient
@@ -196,7 +200,7 @@ async def get_exchange_overview() -> Dict[str, Any]:
             "error": res.get("error") or "Не удалось получить данные с Exchange",
         }
 
-    stdout = res.get("stdout", "")
+    stdout = res.get("stdout", "").lstrip("\ufeff")
     try:
         data = json.loads(stdout)
         return {
@@ -275,7 +279,7 @@ async def get_exchange_mailflow_errors(hours: int = 2) -> Dict[str, Any]:
             "events": [],
         }
 
-    stdout = res.get("stdout", "")
+    stdout = res.get("stdout", "").lstrip("\ufeff")
     try:
         data = json.loads(stdout)
         return {
@@ -371,7 +375,7 @@ async def get_exchange_forwarding_audit() -> Dict[str, Any]:
             "error": res.get("error") or "Не удалось выполнить аудит пересылок Exchange",
         }
 
-    stdout = res.get("stdout", "")
+    stdout = res.get("stdout", "").lstrip("\ufeff")
     try:
         data = json.loads(stdout)
         return {
@@ -390,59 +394,71 @@ async def get_exchange_forwarding_audit() -> Dict[str, Any]:
         }
 
 
-async def _run_exchange_task_ps(inner_ps: str, timeout: int = 35) -> Dict[str, Any]:
+async def _run_exchange_task_ps(
+    inner_ps: str,
+    params: Dict[str, Any] | None = None,
+    timeout: int = 55,
+) -> Dict[str, Any]:
     """Запускает PowerShell-блок на сервере Exchange через одноразовый ScheduledTask (обход NTLM double-hop)."""
-    task_user = (settings.AD_USER or settings.exchange_user or "").strip()
-    task_pass = (settings.AD_PASSWORD or settings.exchange_password or "").replace("'", "''")
-    ps_script = f"""
-    $ErrorActionPreference = 'Stop'
-    $uid = [guid]::NewGuid().ToString('N').Substring(0, 8)
-    $workDir = "C:\\Windows\\Temp"
-    $psPath = "$workDir\\ex_task_$uid.ps1"
-    $outPath = "$workDir\\ex_task_$uid.json"
-    $taskName = "TauriaExTask_$uid"
+    params_b64 = base64.b64encode(
+        json.dumps(params or {}, ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
 
-    $innerScript = @"
-$ErrorActionPreference = 'Stop'
-try {{
-    Add-PSSnapin Microsoft.Exchange.Management.PowerShell.SnapIn -ErrorAction SilentlyContinue
-{inner_ps}
-}} catch {{
-    @{{
-        ok = `$false
-        error = `$_.Exception.Message
-    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
-}}
-"@
-
-    Set-Content -Path $psPath -Value $innerScript -Encoding UTF8
-    try {{
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$psPath`""
-        Register-ScheduledTask -TaskName $taskName -Action $action -User 'NT AUTHORITY\SYSTEM' -RunLevel Highest -Force | Out-Null
-        Start-ScheduledTask -TaskName $taskName
-        for ($i = 0; $i -lt 60; $i++) {{
-            Start-Sleep -Milliseconds 500
-            if (Test-Path $outPath) {{ break }}
-        }}
-        if (Test-Path $outPath) {{
-            Get-Content -Path $outPath -Raw -Encoding UTF8
-        }} else {{
-            $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-            $t = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-            $code = if ($info) {{ $info.LastTaskResult }} else {{ -1 }}
-            $st = if ($t) {{ [string]$t.State }} else {{ "Unknown" }}
-            @{{ ok = $false; error = "Таймаут Exchange задачи (State=$st, LastResult=$code)" }} | ConvertTo-Json -Compress
-        }}
-    }} finally {{
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-        Remove-Item -Path $psPath, $outPath -Force -ErrorAction SilentlyContinue
-    }}
-    """
+    # Внутренний скрипт передается в single-quoted here-string @'...'@ без интерполяции пользовательских данных.
+    ps_script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$uid = [guid]::NewGuid().ToString('N').Substring(0, 8)\n"
+        '$workDir = "C:\\Windows\\Temp"\n'
+        '$psPath = "$workDir\\ex_task_$uid.ps1"\n'
+        '$outPath = "$workDir\\ex_task_$uid.json"\n'
+        '$taskName = "TauriaExTask_$uid"\n'
+        f"$paramsB64 = '{params_b64}'\n"
+        "$innerScript = @'\n"
+        "param([string]$OutPath, [string]$ParamsB64)\n"
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Write-TaskOut($obj) {\n"
+        '    $tmpPath = "$OutPath.tmp"\n'
+        "    $obj | ConvertTo-Json -Compress | Set-Content -Path $tmpPath -Encoding UTF8\n"
+        "    Move-Item -Path $tmpPath -Destination $OutPath -Force\n"
+        "}\n"
+        "try {\n"
+        "    Add-PSSnapin Microsoft.Exchange.Management.PowerShell.SnapIn -ErrorAction SilentlyContinue\n"
+        "    $p = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($ParamsB64)) | ConvertFrom-Json\n"
+        f"{inner_ps}\n"
+        "} catch {\n"
+        "    Write-TaskOut @{ ok = $false; error = $_.Exception.Message }\n"
+        "}\n"
+        "'@\n"
+        "Set-Content -Path $psPath -Value $innerScript -Encoding UTF8\n"
+        "try {\n"
+        '    $argStr = "-NoProfile -ExecutionPolicy Bypass -File `"$psPath`" `"$outPath`" `"$paramsB64`""\n'
+        "    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argStr\n"
+        "    Register-ScheduledTask -TaskName $taskName -Action $action -User 'NT AUTHORITY\\SYSTEM' -RunLevel Highest -Force | Out-Null\n"
+        "    Start-ScheduledTask -TaskName $taskName\n"
+        "    for ($i = 0; $i -lt 90; $i++) {\n"
+        "        Start-Sleep -Milliseconds 500\n"
+        "        if (Test-Path $outPath) { break }\n"
+        "    }\n"
+        "    if (Test-Path $outPath) {\n"
+        "        Get-Content -Path $outPath -Raw -Encoding UTF8\n"
+        "    } else {\n"
+        "        $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue\n"
+        "        $t = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue\n"
+        "        $code = if ($info) { $info.LastTaskResult } else { -1 }\n"
+        '        $st = if ($t) { [string]$t.State } else { "Unknown" }\n'
+        '        @{ ok = $false; error = "Таймаут Exchange задачи (State=$st, LastResult=$code)" } | ConvertTo-Json -Compress\n'
+        "    }\n"
+        "} finally {\n"
+        "    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue\n"
+        '    Remove-Item -Path $psPath, $outPath, "$outPath.tmp" -Force -ErrorAction SilentlyContinue\n'
+        "}\n"
+    )
     res = await asyncio.to_thread(_run_exchange_ps_sync, ps_script, timeout)
     if not res.get("ok"):
         return {"ok": False, "error": res.get("error") or "Ошибка выполнения задачи Exchange"}
     try:
-        data = json.loads(res.get("stdout", "{}"))
+        raw_out = (res.get("stdout", "{}") or "{}").lstrip("\ufeff")
+        data = json.loads(raw_out)
         if not data.get("ok", True):
             return {"ok": False, "error": str(data.get("error") or "Ошибка Exchange")}
         return data
@@ -458,42 +474,54 @@ async def enable_user_mailbox(
 ) -> Dict[str, Any]:
     """Создает почтовый ящик Exchange (Enable-Mailbox) для существующей УЗ Active Directory."""
     clean_id = (identity or "").strip()
-    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+    if not _RE_IDENTITY.fullmatch(clean_id):
         return {"ok": False, "error": "Некорректный логин пользователя"}
 
     clean_alias = (alias or clean_id).strip()
-    if any(c in clean_alias for c in ("'", '"', ";", "`", "$", " ")):
+    if not _RE_IDENTITY.fullmatch(clean_alias):
         clean_alias = clean_id
 
-    db_clause = f" -Database '{database.strip()}'" if database and database.strip() else ""
-    inner_ps = f"""
-    `$existing = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
-    if (`$existing) {{
-        @{{
-            ok = `$true
-            already_exists = `$true
-            primary_smtp = [string]`$existing.PrimarySmtpAddress
-            database = [string]`$existing.Database
-            alias = [string]`$existing.Alias
-        }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    clean_db = (database or "").strip()
+    if clean_db and not _RE_DATABASE.fullmatch(clean_db):
+        return {"ok": False, "error": "Некорректное имя базы данных Exchange"}
+
+    inner_ps = r"""
+    $existing = Get-Mailbox -Identity $p.identity -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-TaskOut @{
+            ok = $true
+            already_exists = $true
+            primary_smtp = [string]$existing.PrimarySmtpAddress
+            database = [string]$existing.Database
+            alias = [string]$existing.Alias
+        }
         exit 0
-    }}
-    `$mbx = Enable-Mailbox -Identity '{clean_id}' -Alias '{clean_alias}'{db_clause} -ErrorAction Stop
-    @{{
-        ok = `$true
-        already_exists = `$false
-        primary_smtp = [string]`$mbx.PrimarySmtpAddress
-        database = [string]`$mbx.Database
-        alias = [string]`$mbx.Alias
-    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    }
+    if ($p.database) {
+        $mbx = Enable-Mailbox -Identity $p.identity -Alias $p.alias -Database $p.database -ErrorAction Stop
+    } else {
+        $mbx = Enable-Mailbox -Identity $p.identity -Alias $p.alias -ErrorAction Stop
+    }
+    Write-TaskOut @{
+        ok = $true
+        already_exists = $false
+        primary_smtp = [string]$mbx.PrimarySmtpAddress
+        database = [string]$mbx.Database
+        alias = [string]$mbx.Alias
+    }
     """
-    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    data = await _run_exchange_task_ps(
+        inner_ps,
+        params={"identity": clean_id, "alias": clean_alias, "database": clean_db},
+        timeout=55,
+    )
     if not data.get("ok"):
         return {"ok": False, "error": data.get("error") or "Не удалось создать почтовый ящик Exchange"}
+    default_domain = (settings.AD_DOMAIN or "kdb.kz").strip()
     return {
         "ok": True,
         "already_exists": bool(data.get("already_exists", False)),
-        "primary_smtp": str(data.get("primary_smtp") or f"{clean_alias}@kdb.kz"),
+        "primary_smtp": str(data.get("primary_smtp") or f"{clean_alias}@{default_domain}"),
         "database": str(data.get("database") or "—"),
         "alias": str(data.get("alias") or clean_alias),
     }
@@ -502,26 +530,26 @@ async def enable_user_mailbox(
 async def disable_user_mailbox(identity: str) -> Dict[str, Any]:
     """Отключает/удаляет почтовый ящик Exchange (Disable-Mailbox), сохраняя УЗ Active Directory."""
     clean_id = (identity or "").strip()
-    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+    if not _RE_IDENTITY.fullmatch(clean_id):
         return {"ok": False, "error": "Некорректный логин пользователя"}
 
-    inner_ps = f"""
-    `$existing = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
-    if (-not `$existing) {{
-        @{{
-            ok = `$false
-            error = "У пользователя '{clean_id}' нет активного почтового ящика Exchange"
-        }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    inner_ps = r"""
+    $existing = Get-Mailbox -Identity $p.identity -ErrorAction SilentlyContinue
+    if (-not $existing) {
+        Write-TaskOut @{
+            ok = $false
+            error = "У пользователя '$($p.identity)' нет активного почтового ящика Exchange"
+        }
         exit 0
-    }}
-    `$smtp = [string]`$existing.PrimarySmtpAddress
-    Disable-Mailbox -Identity '{clean_id}' -Confirm:`$false -ErrorAction Stop
-    @{{
-        ok = `$true
-        primary_smtp = `$smtp
-    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    }
+    $smtp = [string]$existing.PrimarySmtpAddress
+    Disable-Mailbox -Identity $p.identity -Confirm:$false -ErrorAction Stop
+    Write-TaskOut @{
+        ok = $true
+        primary_smtp = $smtp
+    }
     """
-    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    data = await _run_exchange_task_ps(inner_ps, params={"identity": clean_id}, timeout=55)
     if not data.get("ok"):
         return {"ok": False, "error": data.get("error") or "Не удалось удалить почтовый ящик Exchange"}
     return {
@@ -533,35 +561,35 @@ async def disable_user_mailbox(identity: str) -> Dict[str, Any]:
 async def get_mailbox_details(identity: str) -> Dict[str, Any]:
     """Возвращает детальную информацию о почтовом ящике Exchange и его статистику."""
     clean_id = (identity or "").strip()
-    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+    if not _RE_IDENTITY.fullmatch(clean_id):
         return {"ok": False, "error": "Некорректный логин пользователя"}
 
-    inner_ps = f"""
-    `$mbx = Get-Mailbox -Identity '{clean_id}' -ErrorAction SilentlyContinue
-    if (-not `$mbx) {{
-        @{{
-            ok = `$true
-            exists = `$false
-        }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    inner_ps = r"""
+    $mbx = Get-Mailbox -Identity $p.identity -ErrorAction SilentlyContinue
+    if (-not $mbx) {
+        Write-TaskOut @{
+            ok = $true
+            exists = $false
+        }
         exit 0
-    }}
-    `$stats = Get-MailboxStatistics -Identity '{clean_id}' -ErrorAction SilentlyContinue
-    `$totalSize = if (`$stats -and `$stats.TotalItemSize) {{ [string]`$stats.TotalItemSize }} else {{ "—" }}
-    `$itemCount = if (`$stats -and `$null -ne `$stats.ItemCount) {{ [int]`$stats.ItemCount }} else {{ 0 }}
-    `$fwd = if (`$mbx.ForwardingSmtpAddress) {{ [string]`$mbx.ForwardingSmtpAddress }} else {{ "" }}
-    @{{
-        ok = `$true
-        exists = `$true
-        primary_smtp = [string]`$mbx.PrimarySmtpAddress
-        database = [string]`$mbx.Database
-        alias = [string]`$mbx.Alias
-        hidden_from_gal = [bool]`$mbx.HiddenFromAddressListsEnabled
-        forwarding = `$fwd
-        total_size = `$totalSize
-        item_count = `$itemCount
-    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    }
+    $stats = Get-MailboxStatistics -Identity $p.identity -ErrorAction SilentlyContinue
+    $totalSize = if ($stats -and $stats.TotalItemSize) { [string]$stats.TotalItemSize } else { "—" }
+    $itemCount = if ($stats -and $null -ne $stats.ItemCount) { [int]$stats.ItemCount } else { 0 }
+    $fwd = if ($mbx.ForwardingSmtpAddress) { [string]$mbx.ForwardingSmtpAddress } else { "" }
+    Write-TaskOut @{
+        ok = $true
+        exists = $true
+        primary_smtp = [string]$mbx.PrimarySmtpAddress
+        database = [string]$mbx.Database
+        alias = [string]$mbx.Alias
+        hidden_from_gal = [bool]$mbx.HiddenFromAddressListsEnabled
+        forwarding = $fwd
+        total_size = $totalSize
+        item_count = $itemCount
+    }
     """
-    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    data = await _run_exchange_task_ps(inner_ps, params={"identity": clean_id}, timeout=55)
     if not data.get("ok"):
         return {"ok": False, "error": data.get("error") or "Не удалось получить данные почтового ящика"}
     if not data.get("exists"):
@@ -582,18 +610,21 @@ async def get_mailbox_details(identity: str) -> Dict[str, Any]:
 async def set_mailbox_hidden_gal(identity: str, hidden: bool) -> Dict[str, Any]:
     """Скрывает или показывает почтовый ящик в глобальной адресной книге (GAL)."""
     clean_id = (identity or "").strip()
-    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+    if not _RE_IDENTITY.fullmatch(clean_id):
         return {"ok": False, "error": "Некорректный логин пользователя"}
 
-    ps_bool = "true" if hidden else "false"
-    inner_ps = f"""
-    Set-Mailbox -Identity '{clean_id}' -HiddenFromAddressListsEnabled `${ps_bool} -ErrorAction Stop
-    @{{
-        ok = `$true
-        hidden_from_gal = `${ps_bool}
-    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    inner_ps = r"""
+    Set-Mailbox -Identity $p.identity -HiddenFromAddressListsEnabled ([bool]$p.hidden) -ErrorAction Stop
+    Write-TaskOut @{
+        ok = $true
+        hidden_from_gal = [bool]$p.hidden
+    }
     """
-    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    data = await _run_exchange_task_ps(
+        inner_ps,
+        params={"identity": clean_id, "hidden": bool(hidden)},
+        timeout=55,
+    )
     if not data.get("ok"):
         return {"ok": False, "error": data.get("error") or "Не удалось обновить видимость в GAL"}
     return {"ok": True, "hidden_from_gal": hidden}
@@ -603,20 +634,24 @@ async def grant_mailbox_full_access(mailbox_id: str, delegate_user: str) -> Dict
     """Выдает права FullAccess (с AutoMapping) указанному делегату на почтовый ящик."""
     clean_id = (mailbox_id or "").strip()
     clean_delegate = (delegate_user or "").strip()
-    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+    if not _RE_IDENTITY.fullmatch(clean_id):
         return {"ok": False, "error": "Некорректный логин ящика"}
-    if not clean_delegate or any(c in clean_delegate for c in ("'", '"', ";", "`", "$", " ")):
+    if not _RE_IDENTITY.fullmatch(clean_delegate):
         return {"ok": False, "error": "Некорректный логин делегата"}
 
-    inner_ps = f"""
-    Add-MailboxPermission -Identity '{clean_id}' -User '{clean_delegate}' -AccessRights FullAccess -InheritanceType All -AutoMapping `$true -ErrorAction Stop | Out-Null
-    @{{
-        ok = `$true
-        mailbox_id = '{clean_id}'
-        delegate_user = '{clean_delegate}'
-    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    inner_ps = r"""
+    Add-MailboxPermission -Identity $p.mailbox_id -User $p.delegate_user -AccessRights FullAccess -InheritanceType All -AutoMapping $true -ErrorAction Stop | Out-Null
+    Write-TaskOut @{
+        ok = $true
+        mailbox_id = $p.mailbox_id
+        delegate_user = $p.delegate_user
+    }
     """
-    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    data = await _run_exchange_task_ps(
+        inner_ps,
+        params={"mailbox_id": clean_id, "delegate_user": clean_delegate},
+        timeout=55,
+    )
     if not data.get("ok"):
         return {"ok": False, "error": data.get("error") or "Не удалось выдать права FullAccess"}
     return {"ok": True, "mailbox_id": clean_id, "delegate_user": clean_delegate}
@@ -625,25 +660,29 @@ async def grant_mailbox_full_access(mailbox_id: str, delegate_user: str) -> Dict
 async def set_mailbox_forwarding(identity: str, target_email: str | None) -> Dict[str, Any]:
     """Настраивает или отключает пересылку писем (ForwardingSmtpAddress) для почтового ящика."""
     clean_id = (identity or "").strip()
-    if not clean_id or any(c in clean_id for c in ("'", '"', ";", "`", "$")):
+    if not _RE_IDENTITY.fullmatch(clean_id):
         return {"ok": False, "error": "Некорректный логин пользователя"}
 
     clean_target = (target_email or "").strip()
-    if clean_target:
-        if any(c in clean_target for c in ("'", '"', ";", "`", "$", " ")) or "@" not in clean_target:
-            return {"ok": False, "error": "Некорректный email для пересылки"}
-        ps_cmd = f"Set-Mailbox -Identity '{clean_id}' -ForwardingSmtpAddress '{clean_target}' -DeliverToMailboxAndForward `$true -ErrorAction Stop"
-    else:
-        ps_cmd = f"Set-Mailbox -Identity '{clean_id}' -ForwardingSmtpAddress `$null -ErrorAction Stop"
+    if clean_target and not _RE_EMAIL.fullmatch(clean_target):
+        return {"ok": False, "error": "Некорректный email для пересылки"}
 
-    inner_ps = f"""
-    {ps_cmd}
-    @{{
-        ok = `$true
-        forwarding = '{clean_target}'
-    }} | ConvertTo-Json -Compress | Set-Content -Path '$outPath' -Encoding UTF8
+    inner_ps = r"""
+    if ($p.target_email) {
+        Set-Mailbox -Identity $p.identity -ForwardingSmtpAddress $p.target_email -DeliverToMailboxAndForward $true -ErrorAction Stop
+    } else {
+        Set-Mailbox -Identity $p.identity -ForwardingSmtpAddress $null -ForwardingAddress $null -DeliverToMailboxAndForward $false -ErrorAction Stop
+    }
+    Write-TaskOut @{
+        ok = $true
+        forwarding = $p.target_email
+    }
     """
-    data = await _run_exchange_task_ps(inner_ps, timeout=35)
+    data = await _run_exchange_task_ps(
+        inner_ps,
+        params={"identity": clean_id, "target_email": clean_target},
+        timeout=55,
+    )
     if not data.get("ok"):
         return {"ok": False, "error": data.get("error") or "Не удалось обновить пересылку писем"}
     return {"ok": True, "forwarding": clean_target}

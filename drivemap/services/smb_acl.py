@@ -536,8 +536,11 @@ class SmbAclClient:
         conn, sess, tree = self._connect_tree(share_root)
         try:
             for item in reversed(snapshots):
+                rel_path = str(item.get("rel_path", ""))
+                if ".." in rel_path.replace("/", "\\").split("\\"):
+                    raise ValueError(f"Недопустимый путь в снимке ACL (path traversal): {rel_path!r}")
                 dacl_bytes = base64.b64decode(item["dacl_b64"])
-                self._set_dacl_on_tree(conn, sess, tree, item["rel_path"], bool(item["is_dir"]), dacl_bytes)
+                self._set_dacl_on_tree(conn, sess, tree, rel_path, bool(item["is_dir"]), dacl_bytes)
         finally:
             try:
                 tree.disconnect()

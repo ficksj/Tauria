@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import sqlite3
+import tempfile
 from typing import Dict, Any, List, Optional
 from config import settings
 from services.logger_service import log
@@ -33,9 +34,26 @@ class KolinsManagerService:
             return f.readlines()
 
     def _write_env_lines(self, lines: List[str]):
-        """Запись строк обратно в .env"""
-        with open(self.env_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
+        """Атомарная запись строк обратно в .env с правами 0o600."""
+        env_dir = os.path.dirname(os.path.abspath(self.env_path)) or "."
+        fd, tmp_path = tempfile.mkstemp(prefix=".env_tmp_", dir=env_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.chmod(tmp_path, 0o600)
+            except OSError:
+                pass
+            os.replace(tmp_path, self.env_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
 
     async def get_admin_ids(self) -> List[int]:
         """
@@ -159,11 +177,11 @@ class KolinsManagerService:
                         "db_size_kb": 0,
                     }
 
+            conn = None
             try:
                 db_size = os.path.getsize(target_db) // 1024
                 conn = sqlite3.connect(target_db, timeout=15.0)
                 cur = conn.cursor()
-                cur.execute("PRAGMA journal_mode=WAL;")
                 cur.execute("PRAGMA busy_timeout=15000;")
 
                 cur.execute("SELECT COUNT(*) FROM user_pc_sessions")
@@ -188,7 +206,6 @@ class KolinsManagerService:
                 cur.execute("SELECT username, pc_name, updated_at FROM user_pc_sessions ORDER BY updated_at DESC LIMIT 5")
                 recent_sessions = [{"username": r[0], "pc_name": r[1], "updated_at": r[2]} for r in cur.fetchall()]
 
-                conn.close()
                 return {
                     "exists": True,
                     "active_sessions": sessions,
@@ -211,6 +228,9 @@ class KolinsManagerService:
                     "lotus_pending": 0,
                     "db_size_kb": 0,
                 }
+            finally:
+                if conn is not None:
+                    conn.close()
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _query_db)
@@ -223,7 +243,7 @@ class KolinsManagerService:
         """
         db_stats = await self.get_db_stats()
 
-        def _parse_journal():
+        def _collect_ops():
             stats = {
                 "password_resets": 0,
                 "user_unlocks": 0,
@@ -231,9 +251,52 @@ class KolinsManagerService:
                 "ad_searches": 0,
                 "total_requests": 0,
                 "lockout_alerts_detected": 0,
+                "source": "audit_logs",
             }
-            if os.name == "nt":
+            # 1. Сначала пробуем общую таблицу audit_logs
+            target_db = self.db_path
+            if not os.path.exists(target_db):
+                from services.db_service import DB_PATH as TAURIA_DB
+                target_db = TAURIA_DB
+
+            if target_db and os.path.exists(target_db):
+                conn = None
+                try:
+                    conn = sqlite3.connect(target_db, timeout=15.0)
+                    cur = conn.cursor()
+                    cur.execute("PRAGMA busy_timeout=15000;")
+                    cur.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='audit_logs'"
+                    )
+                    if cur.fetchone():
+                        cur.execute("SELECT action FROM audit_logs")
+                        for (act,) in cur.fetchall():
+                            a_low = (act or "").lower()
+                            if "password" in a_low or "парол" in a_low or "reset" in a_low:
+                                stats["password_resets"] += 1
+                            elif "unlock" in a_low or "разблок" in a_low:
+                                stats["user_unlocks"] += 1
+                            elif "act" in a_low or "акт" in a_low:
+                                stats["handover_acts"] += 1
+                            elif "search" in a_low or "поиск" in a_low:
+                                stats["ad_searches"] += 1
+                        stats["total_requests"] = (
+                            stats["password_resets"]
+                            + stats["user_unlocks"]
+                            + stats["handover_acts"]
+                            + stats["ad_searches"]
+                        )
+                except Exception as e:
+                    log.warning(f"Failed to read audit_logs for Kolins stats: {e}")
+                finally:
+                    if conn is not None:
+                        conn.close()
+
+            if stats["total_requests"] > 0 or os.name == "nt":
                 return stats
+
+            # 2. Fallback на journalctl kolins-bot
+            stats["source"] = "journalctl"
             try:
                 import subprocess
                 cmd = ["journalctl", "-u", "kolins-bot", "-n", str(journal_lines), "--no-pager"]
@@ -265,7 +328,7 @@ class KolinsManagerService:
             return stats
 
         loop = asyncio.get_running_loop()
-        ops_stats = await loop.run_in_executor(None, _parse_journal)
+        ops_stats = await loop.run_in_executor(None, _collect_ops)
 
         return {
             "db": db_stats,
@@ -294,13 +357,16 @@ class KolinsManagerService:
                     text=True,
                     timeout=15,
                 )
+                ok = res.returncode == 0
+                stderr_txt = res.stderr.strip()
                 return {
-                    "success": res.returncode == 0,
+                    "success": ok,
                     "maintenance": enable,
                     "action": action,
                     "service": "kolins-bot",
                     "stdout": res.stdout.strip(),
-                    "stderr": res.stderr.strip(),
+                    "stderr": stderr_txt,
+                    "error": "" if ok else (stderr_txt or f"systemctl exited with code {res.returncode}"),
                 }
             except Exception as e:
                 log.error(f"Failed to {action} kolins-bot: {e}")
@@ -311,6 +377,7 @@ class KolinsManagerService:
                     "service": "kolins-bot",
                     "stdout": "",
                     "stderr": str(e),
+                    "error": str(e),
                 }
 
         loop = asyncio.get_running_loop()

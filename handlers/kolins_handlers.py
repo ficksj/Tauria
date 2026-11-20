@@ -95,8 +95,7 @@ async def cb_kolins_maintenance(call: CallbackQuery):
 
 
 # Просмотр и управление саппортами Testarossa (Kolins)
-@kolins_router.callback_query(F.data == "kolins:admins")
-async def cb_kolins_admins(call: CallbackQuery):
+async def _render_kolins_admins(call: CallbackQuery):
     admin_ids = await kolins_manager_service.get_admin_ids()
     body = [
         f"Список авторизованных сотрудников техподдержки в <code>{settings.KOLINS_PATH}/.env</code>:",
@@ -126,6 +125,12 @@ async def cb_kolins_admins(call: CallbackQuery):
         buttons=buttons,
     )
     await edit_rich(call.message, card)
+
+
+@kolins_router.callback_query(F.data == "kolins:admins")
+async def cb_kolins_admins(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await _render_kolins_admins(call)
     await call.answer()
 
 
@@ -198,7 +203,7 @@ async def cb_kolins_deladmin(call: CallbackQuery):
         await call.answer(f"✅ ID {target_id} удален из саппортов!", show_alert=True)
     else:
         await call.answer(f"❌ Ошибка удаления {target_id}", show_alert=True)
-    await cb_kolins_admins(call)
+    await _render_kolins_admins(call)
 
 
 # Детальная статистика Testarossa (Kolins)

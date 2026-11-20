@@ -1,11 +1,16 @@
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import time
 from typing import Dict, Any, List, Optional
 from services.logger_service import log
 from services.rich_message_service import render_progress_bar
+
+_RE_DNS_NAME = re.compile(r"^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*$")
+_RE_DNS_ZONE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$")
+_RE_DNS_CNAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$")
 
 # Список контролируемых системных служб
 MANAGED_SERVICES = [
@@ -24,16 +29,22 @@ SERVICE_LABELS = {
 
 async def check_ping(host: str, count: int = 2, timeout_sec: int = 2) -> Dict[str, Any]:
     """Асинхронный ICMP ping (работает и на Linux, и на Windows)"""
+    clean_host = (host or "").strip()
+    if not clean_host or clean_host.startswith(("-", "/")):
+        return {"alive": False, "host": host, "output": "Некорректное имя хоста"}
     is_windows = os.name == 'nt'
-    cmd = ["ping", "-n" if is_windows else "-c", str(count), "-w" if is_windows else "-W", str(timeout_sec * 1000 if is_windows else timeout_sec), host]
+    cmd = ["ping", "-n" if is_windows else "-c", str(count), "-w" if is_windows else "-W", str(timeout_sec * 1000 if is_windows else timeout_sec), clean_host]
     
     def _run():
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        return res.returncode == 0, res.stdout
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+            return res.returncode == 0, res.stdout
+        except subprocess.TimeoutExpired:
+            return False, "Ping timeout (10s)"
 
     loop = asyncio.get_running_loop()
     alive, output = await loop.run_in_executor(None, _run)
-    return {"alive": alive, "host": host, "output": output}
+    return {"alive": alive, "host": clean_host, "output": output}
 
 async def check_tcp_port(host: str, port: int, timeout_sec: float = 2.5) -> bool:
     """Асинхронная проверка доступности TCP порта (True/False)"""
@@ -187,7 +198,10 @@ async def get_all_services_status(service_list: Optional[List[str]] = None) -> L
 
 async def restart_service(service_name: str) -> bool:
     """Перезапуск systemd сервиса (требует sudo)"""
-    cmd = ["sudo", "systemctl", "restart", service_name]
+    if service_name not in MANAGED_SERVICES:
+        log.warning(f"Rejected restart_service for unmanaged service: {service_name!r}")
+        return False
+    cmd = ["sudo", "systemctl", "restart", "--", service_name]
     def _restart():
         try:
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
@@ -202,7 +216,16 @@ async def get_service_logs(service_name: str, lines: int = 50) -> Dict[str, Any]
     """
     Получение последних логов systemd сервиса через journalctl -u <service> -n <lines> --no-pager
     """
-    cmd = ["journalctl", "-u", service_name, "-n", str(lines), "--no-pager"]
+    if service_name not in MANAGED_SERVICES:
+        log.warning(f"Rejected get_service_logs for unmanaged service: {service_name!r}")
+        return {
+            "service": service_name,
+            "success": False,
+            "lines_count": 0,
+            "logs": f"Служба '{service_name}' не входит в список управляемых служб."
+        }
+    safe_lines = max(1, min(int(lines), 500))
+    cmd = ["journalctl", "-u", service_name, "-n", str(safe_lines), "--no-pager"]
     def _get_logs():
         try:
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
@@ -238,12 +261,12 @@ async def add_dns_record(
     clean_name = (name or "").strip().rstrip(".")
     clean_val = (value or "").strip()
     rtype = (record_type or "A").strip().upper()
-    target_zone = (zone or settings.AD_DOMAIN or "kdb.kz").strip()
+    target_zone = (zone or settings.AD_DOMAIN or "kdb.kz").strip().rstrip(".")
 
-    if not clean_name or any(c in clean_name for c in ("'", '"', ";", "`", "$", " ")):
+    if not clean_name or len(clean_name) > 253 or not _RE_DNS_NAME.fullmatch(clean_name):
         return {"ok": False, "error": "Некорректное имя DNS-записи."}
-    if not clean_val or any(c in clean_val for c in ("'", '"', ";", "`", "$", " ")):
-        return {"ok": False, "error": "Некорректное значение DNS-записи."}
+    if not target_zone or len(target_zone) > 253 or not _RE_DNS_ZONE.fullmatch(target_zone):
+        return {"ok": False, "error": f"Некорректная DNS-зона: {target_zone}"}
 
     if rtype == "A":
         try:
@@ -252,13 +275,17 @@ async def add_dns_record(
             return {"ok": False, "error": f"Некорректный IPv4-адрес: {clean_val}"}
         ps_cmd = (
             f"$ErrorActionPreference='Stop'; "
-            f"try {{ Add-DnsServerResourceRecordA -Name '{clean_name}' -ZoneName '{target_zone}' -IPv4Address '{clean_val}' -AllowUpdateAny -CreatePtr }} "
-            f"catch {{ Add-DnsServerResourceRecordA -Name '{clean_name}' -ZoneName '{target_zone}' -IPv4Address '{clean_val}' -AllowUpdateAny }}"
+            f"try {{ Add-DnsServerResourceRecordA -Name '{clean_name}' -ZoneName '{target_zone}' -IPv4Address '{clean_val}' -AllowUpdateAny -CreatePtr -ErrorAction Stop }} "
+            f"catch {{ Add-DnsServerResourceRecordA -Name '{clean_name}' -ZoneName '{target_zone}' -IPv4Address '{clean_val}' -AllowUpdateAny -ErrorAction Stop }}; "
+            f"Write-Output '__DNS_OK__'"
         )
     elif rtype == "CNAME":
+        if not clean_val or len(clean_val) > 253 or not _RE_DNS_CNAME.fullmatch(clean_val):
+            return {"ok": False, "error": f"Некорректное значение CNAME-записи: {clean_val}"}
         ps_cmd = (
             f"$ErrorActionPreference='Stop'; "
-            f"Add-DnsServerResourceRecordCName -Name '{clean_name}' -ZoneName '{target_zone}' -HostNameAlias '{clean_val}'"
+            f"Add-DnsServerResourceRecordCName -Name '{clean_name}' -ZoneName '{target_zone}' -HostNameAlias '{clean_val}' -ErrorAction Stop; "
+            f"Write-Output '__DNS_OK__'"
         )
     else:
         return {"ok": False, "error": f"Неподдерживаемый тип записи: {rtype} (поддерживаются A и CNAME)."}
@@ -287,7 +314,7 @@ async def add_dns_record(
                 read_timeout=20,
             )
             stdout, streams, had_errors = client.execute_ps(ps_cmd)
-            if had_errors:
+            if "__DNS_OK__" not in (stdout or ""):
                 err_msgs = [str(e) for e in (streams.error or [])] if streams else []
                 err_text = "; ".join(err_msgs)[:300] or "Ошибка PowerShell DNS"
                 return {"ok": False, "error": err_text}

@@ -2,6 +2,7 @@ import asyncio
 import inspect
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
+from aiogram.fsm.context import FSMContext
 
 from services.ad_service import ad_service
 from services.db_service import (
@@ -101,7 +102,7 @@ async def _render_health_dashboard(callback: CallbackQuery):
         asyncio.to_thread(list_pending_lotus_transfers),
     )
 
-    alerts_on = get_setting("lockout_alerts_enabled", "0") == "1"
+    alerts_on = (await asyncio.to_thread(get_setting, "lockout_alerts_enabled", "0")) == "1"
     alert_label = "Включены ✅" if alerts_on else "Выключены 🔕"
     toggle_btn_text = "🔕 Выключить алерты блокировок" if alerts_on else "🔔 Включить алерты блокировок"
     toggle_style = "danger" if alerts_on else "success"
@@ -144,16 +145,17 @@ async def _render_health_dashboard(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "health:main")
-async def show_health_dashboard(callback: CallbackQuery):
+async def show_health_dashboard(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     await callback.answer()
     await _render_health_dashboard(callback)
 
 
 @router.callback_query(F.data == "health:toggle_alerts")
 async def toggle_lockout_alerts(callback: CallbackQuery):
-    current = get_setting("lockout_alerts_enabled", "0") == "1"
+    current = (await asyncio.to_thread(get_setting, "lockout_alerts_enabled", "0")) == "1"
     new_val = "0" if current else "1"
-    set_setting("lockout_alerts_enabled", new_val)
+    await asyncio.to_thread(set_setting, "lockout_alerts_enabled", new_val)
     reset_lockout_baseline()
 
     status_text = "Включены (только новые события)" if new_val == "1" else "Выключены"

@@ -43,6 +43,8 @@ class SmbSysvolClient:
 
     def _policy_root(self, gpo_guid: str) -> str:
         clean_guid = gpo_guid.strip().strip("{}").upper()
+        if not re.fullmatch(r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}", clean_guid):
+            raise ValueError(f"Некорректный GPO GUID: {gpo_guid!r}")
         return f"\\\\{self.host}\\{self.share}\\{self.domain_dir}\\Policies\\{{{clean_guid}}}"
 
     def _drives_dir(self, gpo_guid: str) -> str:

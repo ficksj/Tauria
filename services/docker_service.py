@@ -1,9 +1,12 @@
 import asyncio
+import re
 from typing import Dict, List
 
 from services.logger_service import get_logger
 
 logger = get_logger("DockerService")
+
+_RE_CONTAINER_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 
 
 async def list_containers() -> List[Dict[str, str]]:
@@ -49,34 +52,45 @@ async def list_containers() -> List[Dict[str, str]]:
 
 async def restart_container(name: str) -> bool:
     """Перезапускает Docker-контейнер по имени."""
+    clean_name = (name or "").strip()
+    if not _RE_CONTAINER_NAME.fullmatch(clean_name):
+        logger.warning(f"Rejected restart_container with invalid name: {name!r}")
+        return False
     try:
         proc = await asyncio.create_subprocess_exec(
             "docker",
             "restart",
-            name,
+            "--",
+            clean_name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
         if proc.returncode != 0:
             err = stderr.decode("utf-8", errors="replace").strip()
-            logger.warning(f"docker restart {name} failed (rc={proc.returncode}): {err}")
+            logger.warning(f"docker restart {clean_name} failed (rc={proc.returncode}): {err}")
             return False
         return True
     except Exception as e:
-        logger.error(f"restart_container({name}) error: {e}")
+        logger.error(f"restart_container({clean_name}) error: {e}")
         return False
 
 
 async def get_container_logs(name: str, lines: int = 30) -> str:
     """Возвращает последние N строк логов Docker-контейнера."""
+    clean_name = (name or "").strip()
+    if not _RE_CONTAINER_NAME.fullmatch(clean_name):
+        logger.warning(f"Rejected get_container_logs with invalid name: {name!r}")
+        return "Некорректное имя контейнера."
+    safe_lines = max(1, min(int(lines), 500))
     try:
         proc = await asyncio.create_subprocess_exec(
             "docker",
             "logs",
             "--tail",
-            str(lines),
-            name,
+            str(safe_lines),
+            "--",
+            clean_name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -88,5 +102,5 @@ async def get_container_logs(name: str, lines: int = 30) -> str:
             return f"docker logs failed with exit code {proc.returncode}"
         return combined
     except Exception as e:
-        logger.error(f"get_container_logs({name}) error: {e}")
+        logger.error(f"get_container_logs({clean_name}) error: {e}")
         return f"Ошибка получения логов: {e}"

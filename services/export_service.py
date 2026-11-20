@@ -1,7 +1,9 @@
+import asyncio
 import csv
 import os
 import tempfile
-from datetime import datetime, timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -10,15 +12,23 @@ from services.logger_service import get_logger
 
 logger = get_logger("ExportService")
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _sanitize_csv_cell(value: str) -> str:
+    if value and value[0] in _CSV_FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
 
 async def export_audit_csv(days: int = 30) -> str:
     """
     Выгружает записи из audit_logs и offboard_snapshots за последние N дней
     в CSV-файл (UTF-8 с BOM) и возвращает путь к файлу.
     """
-    now = datetime.now()
-    since_str = (now - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    filename = f"tauria_audit_{now.strftime('%Y%m%d_%H%M')}.csv"
+    now_utc = datetime.now(timezone.utc)
+    since_str = (now_utc - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    filename = f"tauria_audit_{now_utc.strftime('%Y%m%d_%H%M')}_{uuid.uuid4().hex[:8]}.csv"
     export_dir = tempfile.gettempdir()
     os.makedirs(export_dir, exist_ok=True)
     file_path = os.path.join(export_dir, filename)
@@ -26,7 +36,6 @@ async def export_audit_csv(days: int = 30) -> str:
     rows: list[list[str]] = []
 
     async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
-        await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("PRAGMA busy_timeout=15000;")
         db.row_factory = aiosqlite.Row
 
@@ -81,10 +90,14 @@ async def export_audit_csv(days: int = 30) -> str:
                         details,
                     ])
 
-    with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f, delimiter=";")
-        writer.writerow(["source", "timestamp", "actor", "action", "target", "status", "details"])
-        writer.writerows(rows)
+    def _write_csv():
+        with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow(["source", "timestamp", "actor", "action", "target", "status", "details"])
+            for row in rows:
+                writer.writerow([_sanitize_csv_cell(c) for c in row])
+
+    await asyncio.to_thread(_write_csv)
 
     logger.info(f"Exported {len(rows)} audit rows for last {days} days to {file_path}")
     return file_path

@@ -1,30 +1,43 @@
+import asyncio
 import csv
 import html
 import io
 import json
 import os
 import tempfile
+import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from services.ad_service import ad_service
 from services.exchange_service import get_exchange_forwarding_audit, get_exchange_overview
 
+TZ_LOCAL = timezone(timedelta(hours=5))
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _sanitize_csv_cell(value: Any) -> Any:
+    if isinstance(value, str) and value and value[0] in _CSV_FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
 
 def _to_csv_bytes(headers: list[str], rows: list[list[Any]]) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf, delimiter=",", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(headers)
-    writer.writerows(rows)
+    writer.writerow([_sanitize_csv_cell(h) for h in headers])
+    for row in rows:
+        writer.writerow([_sanitize_csv_cell(c) for c in row])
     return buf.getvalue().encode("utf-8-sig")
 
 
 async def generate_kpmg_audit_zip() -> str:
     """Формирует единый ZIP-архив для аудита KPMG / ГТС и возвращает путь к нему."""
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    zip_path = os.path.join(tempfile.gettempdir(), f"kpmg_gts_audit_{stamp}.zip")
+    now_local = datetime.now(TZ_LOCAL)
+    generated_at = now_local.strftime("%Y-%m-%d %H:%M:%S")
+    stamp = now_local.strftime("%Y%m%d_%H%M%S")
+    zip_path = os.path.join(tempfile.gettempdir(), f"kpmg_gts_audit_{stamp}_{uuid.uuid4().hex[:8]}.zip")
 
     # 1. Привилегированные группы AD
     try:
@@ -99,15 +112,21 @@ async def generate_kpmg_audit_zip() -> str:
         "errors": [],
     }
     try:
-        exchange_summary["overview"] = await get_exchange_overview()
+        overview = await get_exchange_overview()
+        exchange_summary["overview"] = overview
+        if isinstance(overview, dict) and not overview.get("ok", True):
+            exchange_summary["errors"].append(f"overview: {overview.get('error', 'unavailable')}")
     except Exception as exc:
-        exchange_summary["overview"] = {"available": False, "error": str(exc)}
+        exchange_summary["overview"] = {"ok": False, "available": False, "error": str(exc)}
         exchange_summary["errors"].append(f"overview: {exc}")
 
     try:
-        exchange_summary["forwarding_audit"] = await get_exchange_forwarding_audit()
+        fwd = await get_exchange_forwarding_audit()
+        exchange_summary["forwarding_audit"] = fwd
+        if isinstance(fwd, dict) and not fwd.get("ok", True):
+            exchange_summary["errors"].append(f"forwarding_audit: {fwd.get('error', 'unavailable')}")
     except Exception as exc:
-        exchange_summary["forwarding_audit"] = {"available": False, "error": str(exc)}
+        exchange_summary["forwarding_audit"] = {"ok": False, "available": False, "error": str(exc)}
         exchange_summary["errors"].append(f"forwarding_audit: {exc}")
 
     exchange_json_bytes = json.dumps(exchange_summary, ensure_ascii=False, indent=2, default=str).encode("utf-8")
@@ -175,11 +194,13 @@ async def generate_kpmg_audit_zip() -> str:
 </html>
 """
 
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("00_KPMG_GTS_Summary.html", html_content.encode("utf-8"))
-        zf.writestr("01_privileged_groups.csv", priv_csv)
-        zf.writestr("02_inactive_users_60d.csv", inactive_csv)
-        zf.writestr("03_never_expire_passwords.csv", never_expire_csv)
-        zf.writestr("04_exchange_gts_summary.json", exchange_json_bytes)
+    def _write_zip():
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("00_KPMG_GTS_Summary.html", html_content.encode("utf-8"))
+            zf.writestr("01_privileged_groups.csv", priv_csv)
+            zf.writestr("02_inactive_users_60d.csv", inactive_csv)
+            zf.writestr("03_never_expire_passwords.csv", never_expire_csv)
+            zf.writestr("04_exchange_gts_summary.json", exchange_json_bytes)
 
+    await asyncio.to_thread(_write_zip)
     return zip_path
